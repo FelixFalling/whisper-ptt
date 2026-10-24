@@ -1,0 +1,18 @@
+[Unit]
+Description=Whisper push-to-talk dictation
+After=graphical-session.target
+# Only while a desktop session is up: stops at logout, so SSH-only use doesn't keep the model in RAM.
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+# The idle model is parked in RAM and must stay there: swapped out, waking it took 6-21 s
+# instead of ~0.1 s (journal, October 2026).
+MemorySwapMax=0
+ExecStart=%h/.local/share/whisper-ptt/venv/bin/python %h/.local/share/whisper-ptt/whisper-ptt.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

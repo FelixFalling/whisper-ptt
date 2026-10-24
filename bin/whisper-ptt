@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Toggle / inspect the push-to-talk dictation service.
+#   whisper-ptt off      stop it now (frees ~1.4GB VRAM), comes back at next login
+#   whisper-ptt on       start it now
+#   whisper-ptt toggle   flip whichever it currently is
+#   whisper-ptt status   state + VRAM it is holding
+#   whisper-ptt disable  stop AND do not start at login
+#   whisper-ptt enable   start at login again
+#   whisper-ptt restart  apply a config change
+#   whisper-ptt logs [N] the last N log lines (default 40)
+#   whisper-ptt config   edit the settings, then restart to apply
+#   whisper-ptt test     run the unit tests (no keyboard, mic or GPU needed)
+#   whisper-ptt bench [--polish]
+#                        speed and accuracy on the GPU with spoken test sentences
+#   whisper-ptt type-test [ms]
+#                        type a known line into the focused app, to check a speed
+#   whisper-ptt polish on|off|toggle|status [--quiet]
+#                        grammar cleanup by the local model (on unless turned off)
+set -euo pipefail
+U=whisper-ptt.service
+
+vram() {
+  local pid; pid=$(systemctl --user show "$U" -p MainPID --value 2>/dev/null || echo 0)
+  [ "$pid" = "0" ] && { echo "0 MiB"; return; }
+  nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader 2>/dev/null \
+    | awk -F', ' -v p="$pid" '$1+0==p+0 {print $2}' | head -1 | grep . || echo "0 MiB"
+}
+
+case "${1:-status}" in
+  off|stop)    systemctl --user stop "$U";    echo "dictation OFF (VRAM released)" ;;
+  on|start)    systemctl --user start "$U";   echo "dictation ON (ready in a few seconds)" ;;
+  restart)     systemctl --user restart "$U"; echo "dictation restarted (settings reloaded)" ;;
+  logs)        journalctl --user -u "$U" -n "${2:-40}" --no-pager -o cat ;;
+  config)      "${EDITOR:-nano}" "$HOME/.config/whisper-ptt/config.json"
+               echo "run 'whisper-ptt restart' to apply" ;;
+  polish)      STATE="$HOME/.local/state/whisper-ptt/polish"; mkdir -p "$(dirname "$STATE")"
+               CUR=$(cat "$STATE" 2>/dev/null || echo on)
+               case "${2:-status}" in
+                 on|off) echo "$2" > "$STATE" ;;
+                 toggle) if [ "$CUR" = on ]; then echo off > "$STATE"; else echo on > "$STATE"; fi ;;
+                 status) ;;
+                 *) echo "usage: whisper-ptt polish on|off|toggle|status"; exit 2 ;;
+               esac
+               MODE=$(cat "$STATE" 2>/dev/null || echo on)
+               if [ "$MODE" = on ] && [ "${2:-status}" != status ]; then
+                 # load the model now so the next dictation does not wait for it
+                 MODEL=$(python3 -c "import json,pathlib;print(json.loads((pathlib.Path.home()/'.config/whisper-ptt/config.json').read_text()).get('polish_model','qwen3:14b'))")
+                 curl -s -o /dev/null --max-time 60 http://127.0.0.1:11434/api/generate \
+                   -d "{\"model\":\"$MODEL\",\"keep_alive\":\"10m\"}" &
+               fi
+               # --quiet: the top-bar switch shows the state itself, so no banner
+               [ "${2:-status}" != status ] && [ "${3:-}" != --quiet ] && notify-send -a whisper-ptt -e -t 2000 \
+                 "Polish ${MODE^^}" "$( [ "$MODE" = on ] && echo 'Grammar gets cleaned up' || echo 'Typed as spoken')" 2>/dev/null || true
+               echo "polish: $MODE" ;;
+  test)        "$HOME/.local/share/whisper-ptt/venv/bin/python" -m unittest discover \
+                 -s "$HOME/.local/share/whisper-ptt/tests" ;;
+  bench)       "$HOME/.local/share/whisper-ptt/venv/bin/python" \
+                 "$HOME/.local/share/whisper-ptt/tests/bench.py" "${@:2}" ;;
+  type-test)   "$HOME/.local/share/whisper-ptt/venv/bin/python" \
+                 "$HOME/.local/share/whisper-ptt/tests/typetest.py" "${@:2}" ;;
+  toggle)      if systemctl --user is-active --quiet "$U"; then
+                 systemctl --user stop "$U"; echo "dictation OFF"
+               else systemctl --user start "$U"; echo "dictation ON"; fi ;;
+  disable)     systemctl --user disable --now "$U"; echo "dictation OFF and disabled at login" ;;
+  enable)      systemctl --user enable --now "$U";  echo "dictation ON and enabled at login" ;;
+  status|*)
+    printf 'state   : %s (%s at login)\n' \
+      "$(systemctl --user is-active "$U")" "$(systemctl --user is-enabled "$U")"
+    printf 'VRAM    : %s\n' "$(vram)"
+    printf 'model   : %s / %s\n' \
+      "$(python3 -c "import json,pathlib;print(json.loads((pathlib.Path.home()/'.config/whisper-ptt/config.json').read_text()).get('model'))")" \
+      "$(python3 -c "import json,pathlib;print(json.loads((pathlib.Path.home()/'.config/whisper-ptt/config.json').read_text()).get('compute_type'))")"
+    printf 'GPU free: %s\n' "$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader)"
+    ;;
+esac

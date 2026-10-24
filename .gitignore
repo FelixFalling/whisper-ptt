@@ -1,0 +1,23 @@
+# Python environment and caches
+venv/
+__pycache__/
+*.pyc
+# Secrets: the Mac config holds the server token (mac/package.sh fills it in)
+mac/mac.json
+*.zip
+# Private: before/after pairs of real dictations (scripts write it for review)
+polish-review.md
+# Old hand-made backups; git history replaces them
+*.bak
+*.bak-*
+
+# Local runtime configuration and generated data
+.venv/
+config.json
+.env
+.env.*
+*.log
+*.wav
+*.mp3
+*.mp4
+backup*/

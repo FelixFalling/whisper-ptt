@@ -1,0 +1,6 @@
+faster-whisper>=1.2,<2
+numpy>=2,<3
+sounddevice>=0.5,<1
+evdev>=1.9,<2
+nvidia-cublas-cu12>=12,<13
+nvidia-cudnn-cu12>=9,<10

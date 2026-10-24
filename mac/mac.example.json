@@ -1,0 +1,10 @@
+{
+  "server": "http://YOUR-DESKTOP-TAILSCALE-IP:8765",
+  "token": "REPLACE_WITH_YOUR_SERVER_TOKEN",
+  "key": "alt_r",
+  "language": "en",
+  "initial_prompt": "",
+  "trailing_space": true,
+  "fallback": true,
+  "sounds": true
+}

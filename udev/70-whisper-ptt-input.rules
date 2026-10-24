@@ -1,0 +1,4 @@
+# Let the user logged in at the local seat read keyboard events, so push-to-talk
+# dictation can watch for its trigger key on Wayland. logind grants the ACL to
+# the active session only and drops it at logout.
+KERNEL=="event*", SUBSYSTEM=="input", TAG+="uaccess"

@@ -224,6 +224,8 @@ class DictationTests(unittest.TestCase):
         d, jobs = self.make()
         d.handle("trigger", 1)
         d.handle("other", 46)
+        self.assertFalse(d.recorder.running, "cancel must release the microphone immediately")
+        self.assertFalse(d.recording)
         time.sleep(0.1)
         d.handle("trigger", 0)
         self.assertEqual(drain(jobs), [])

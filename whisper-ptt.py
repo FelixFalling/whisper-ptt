@@ -254,9 +254,10 @@ class Recorder:
             return np.zeros(0, dtype=np.float32)
         try:
             stream.stop()
-            stream.close()
         except Exception as exc:        # microphone unplugged mid-recording
             log(f"microphone stopped badly: {exc}")
+        finally:
+            stream.close()
         return join_blocks(self.blocks)
 
 
@@ -521,6 +522,14 @@ class Devices:
     def is_held(self, code):
         with self._held_lock:
             return any(code in keys for keys in self._held.values())
+
+    def trigger_down(self):
+        # Query the kernel, not cached events: a lost release must not leave
+        # the microphone running indefinitely.
+        for dev, has_trigger in list(self.watched.values()):
+            if has_trigger and self.keycode in self._down_now(dev):
+                return True
+        return False
 
     def wait_free(self):
         """Blocks until no modifier is down. A release lost while a keyboard reconnected would
@@ -1142,6 +1151,7 @@ class Dictation:
             self._release()
         elif kind == "other" and self.recording:
             self.cancelled = True        # the trigger is being used as a modifier
+            self._release()              # close the microphone immediately
         elif kind == "lost":
             self.cancelled = True        # its keyboard went away mid-press
             self._release()
@@ -1335,7 +1345,17 @@ def main():
     dictation = Dictation(cfg, holder, Recorder(), jobs)
     while True:
         try:
-            dictation.handle(*events.get())
+            try:
+                event = events.get(timeout=0.1)
+            except queue.Empty:
+                event = None
+            if event is not None:
+                dictation.handle(*event)
+            if (dictation.recording and
+                    time.time() - dictation.started_at > 0.2 and
+                    not devices.trigger_down()):
+                log("trigger no longer held; closing microphone")
+                dictation._release()
         except Exception:
             log(f"key loop hit an unexpected error, carrying on:\n"
                 f"{traceback.format_exc().rstrip()}")

@@ -105,6 +105,8 @@ DEFAULTS = {
     "notify": True,
     "notify_timeout_ms": 1500,
     "trailing_space": True,
+    # Omit the final period below this word count; 0 disables the rule.
+    "short_entry_min_words": 4,
     # Long dictations are transcribed and polished sentence by sentence while he is still
     # talking, so release waits only for the last few seconds of it (see LiveSession).
     "transcribe_while_talking": True,
@@ -145,6 +147,10 @@ def load_config():
             cfg.update(json.loads(CONFIG_PATH.read_text()))
         except Exception as exc:
             log(f"config unreadable, using defaults: {exc}")
+    threshold = cfg["short_entry_min_words"]
+    if type(threshold) is not int or threshold < 0:
+        log("short_entry_min_words must be a nonnegative integer; using 4")
+        cfg["short_entry_min_words"] = 4
     return cfg
 
 
@@ -1073,7 +1079,7 @@ def make_server(holder, cfg, host):
             text, note = maybe_polish(cfg, text)
             log(f"remote {self.client_address[0]}: {audio.size / SAMPLE_RATE:.1f}s audio "
                 f"-> {took:.2f}s{note}")
-            self._reply(200, {"text": text})
+            self._reply(200, {"text": _short_entry(text, cfg["short_entry_min_words"])})
 
     return ThreadingHTTPServer((host, int(cfg["server_port"])), Handler)
 
@@ -1183,6 +1189,38 @@ class Dictation:
         self.jobs.put(Job(audio, held, session, released))
 
 
+def _entry_words(text):
+    """Count Unicode words, keeping apostrophes and hyphens inside a word."""
+    return len(re.findall(r"[^\W_]+(?:['’\-][^\W_]+)*", text))
+
+
+def _short_entry(text, min_words=4):
+    """Omit a terminal full stop for one-to-three-word form entries."""
+    if 0 < _entry_words(text) < min_words:
+        # Keep ellipses, question marks, and exclamation marks; handle closing quotes.
+        return re.sub(r'(?<!\.)\.(?=["”\')\]]*\s*$)', '', text)
+    return text
+
+
+def format_dictation(texts, min_words=4):
+    """Wait only until four words are known; don't treat streamed sentences as entries."""
+    pending = []
+    words = 0
+    for text in texts:
+        if not text:
+            continue
+        if pending is None:
+            yield text
+            continue
+        pending.append(text)
+        words += _entry_words(text)
+        if words >= min_words:
+            yield from pending
+            pending = None
+    if pending:
+        yield _short_entry(" ".join(pending), min_words)
+
+
 def dictate(cfg, holder, typer, job):
     """Transcribes, polishes and types one recording."""
     t0 = time.monotonic()
@@ -1196,7 +1234,7 @@ def dictate(cfg, holder, typer, job):
             text, note = maybe_polish(cfg, text)
             texts = [text]
         typed, ready = [], None
-        for text in texts:
+        for text in format_dictation(texts, cfg["short_entry_min_words"]):
             if not text:
                 continue
             if ready is None:

@@ -57,7 +57,7 @@ Log out and back in after installing or changing the extension JavaScript. No th
 
 ## Configure
 
-Edit `~/.config/whisper-ptt/config.json`, then run `whisper-ptt restart`. Start with `config.example.json`; it contains no credentials and disables network dictation.
+Run `make config` to edit `~/.config/whisper-ptt/config.json`, then run `make deploy` to validate and restart. See [the settings guide](docs/configuration.md) for examples and the UI override behavior. Start with `config.example.json`; it contains no credentials and disables network dictation.
 
 - `model`, `device`, `compute_type`: Whisper transcription settings.
 - `polish_model`: local Ollama model for cleanup.
@@ -66,6 +66,7 @@ Edit `~/.config/whisper-ptt/config.json`, then run `whisper-ptt restart`. Start 
 - `polish_min_word_similarity`: low word overlap triggers an extra local meaning check. This model-based check can still miss meaning changes. Failed cleanup falls back to the transcript.
 - `polish_timeout`: maximum wait per cleanup request; large rewrites can require two requests.
 - `idle_unload_seconds`: parks Whisper in system RAM after inactivity, releasing its GPU allocation.
+- `short_entry_min_words`: omit the terminal period below this word count (default `4`, `0` disables). Questions, exclamations, and ellipses are preserved.
 - `type_delay_ms`: typing pace; increase if an application drops characters.
 
 Turning cleanup on may warm its model. Turning it off through the UI explicitly requests unloading it; the original CLI's polish-off command only changes the preference. Models and transcripts stay local unless you explicitly configure a remote Ollama address or enable the network server. The service journal includes dictated text and can include rejected cleanup drafts; keep logs private.

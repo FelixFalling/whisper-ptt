@@ -16,6 +16,7 @@ check: ## Check Python, shell, JSON, and GNOME JavaScript syntax
 
 test: check ## Run fast control tests with mocked systemd and Ollama
 	@cd "$(ROOT)" && $(PYTHON) -m unittest discover -s tests -p test_controls.py -v
+	@cd "$(ROOT)" && $(PYTHON) -m unittest discover -s tests -p test_short_entries.py -v
 
 test-full: test ## Run the complete daemon suite using the virtual environment
 	@cd "$(ROOT)" && "$(VENV_PYTHON)" -m unittest discover -s tests -v
@@ -51,3 +52,7 @@ update: ## Pull committed updates from GitHub and deploy locally
 	@cd "$(ROOT)" && test -z "$$(git status --porcelain)" || { echo 'Commit or stash local changes before make update.' >&2; exit 1; }
 	@cd "$(ROOT)" && git pull --ff-only
 	@$(MAKE) --no-print-directory -C "$(ROOT)" deploy
+
+.PHONY: config
+config: ## Edit the central private settings file; restart to apply changes
+	@"$(ROOT)/bin/whisper-ptt" config

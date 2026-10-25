@@ -88,27 +88,60 @@ python3 ~/.local/share/whisper-ptt/bin/whisper-ui.py all on
 
 See [mac/README.md](mac/README.md). Set a randomly generated server token and enable the desktop's Tailscale-bound server, then run `bash mac/package.sh`. The generated archive includes the token: share it privately and never commit it. The Mac client uses clipboard insertion, unlike the Linux virtual keyboard.
 
-## Development
+## Development and deployment
+
+The checkout at `~/.local/share/whisper-ptt` is also the running application's source. The development alias points to this same directory. A commit or GitHub push alone does not restart the service. Python changes take effect when the process restarts; GNOME caches extension code until the next login. Private configuration stays outside the repository.
+
+Install GNU Make and Node.js for the local check commands (Arch: `sudo pacman -S --needed make nodejs`). Existing runtime dependencies remain in `venv/`.
 
 ```bash
-python3 -m unittest discover -s tests -p test_controls.py -v
-venv/bin/python -m unittest discover -s tests -v
+cd ~/.local/share/whisper-ptt
+make help
+make test         # syntax checks and fast mocked control tests
+make test-full    # complete daemon suite; needs runtime dependencies and local sockets
+make deploy       # checks, tests, refreshes links, and restarts dictation locally
+make status       # systemd status; an inactive service gives a nonzero exit status
+make logs         # recent logs; may contain private dictated text
+make stop         # stop Whisper and cleanup, and unload cleanup model
+make start        # enable both now
 ```
 
-Control tests mock systemd and Ollama. The full suite requires dependencies and supports optional real virtual-keyboard tests; socket-dependent tests need permission to bind local sockets. A passing automated suite does not validate a running GNOME session, transcription accuracy, or cleanup quality.
+`make deploy` runs the fast tests, not GPU benchmarks or the full daemon suite. It requires the canonical checkout and an existing environment and local configuration. It starts the service even if it was off, but does not change whether it starts at login. Existing private settings are preserved. The active-process check does not guarantee the microphone or GPU model is ready: inspect `make logs` and try a dictation. When changing the daemon, run `make test-full` before deploying as well.
 
-Work in this checkout and commit changes before deploying:
+### Edit, test, deploy, publish
 
 ```bash
+cd ~/.local/share/whisper-ptt
 git switch -c improve-cleanup
-# Edit, test, then review:
+# Edit code in your editor.
+make test
 git diff
-git add README.md whisper-ptt.py  # choose the files you changed
+git add whisper-ptt.py  # explicitly select the files you changed
 git commit -m "Improve cleanup behavior"
-git push -u origin improve-cleanup
+make deploy            # run your changes on this computer
+# Try Right Ctrl dictation and inspect make logs.
+make push              # test and push commits on this branch to GitHub
 ```
 
-Use `git log --oneline` to inspect history and `git revert <commit>` to undo a committed change. Restart dictation after daemon changes; log out and back in after extension changes. Do not run `install-links.sh` from a second checkout unless you intend to point your installation at it.
+`make push` requires a clean working tree, never creates a commit, and does not deploy. `make publish` runs local deployment and then pushes existing commits; use it after committing and testing the behavior you want to publish. GitHub branch pushes do not merge into `main` automatically. Create a pull request or merge your branch when ready.
+
+To get updates that already exist on your current upstream branch, use `make update`. It requires a clean working tree, pulls with `--ff-only`, and then deploys. It does not discard edits or resolve divergent histories automatically. If checks fail after the pull, the service is not restarted; inspect the failure before proceeding.
+
+### Undo a change
+
+```bash
+git log --oneline -10
+git revert <commit-to-undo>
+make deploy
+make push
+```
+
+Reverting creates a new commit so shared history stays intact. Save or commit experiments before reverting. For separate experimental worktrees, run tests there, but deploy only from the canonical checkout.
+
+### GNOME UI changes
+
+Run `make test` and `make deploy`, save your work, then log out and back in. The existing extension is linked to this repository; deployment cannot hot-reload its JavaScript reliably in a Wayland session. Never restart or log out of the desktop automatically during deployment.
+
 
 ## Public repository contents
 

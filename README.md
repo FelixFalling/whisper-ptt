@@ -113,3 +113,9 @@ Use `git log --oneline` to inspect history and `git revert <commit>` to undo a c
 ## Public repository contents
 
 Only source, tests, and example configuration belong here. Runtime configurations, tokens, environments, model downloads, logs, recordings, generated Mac archives, and private before/after dictation collections are excluded. This public repository begins with a curated snapshot; the original local repository retains its earlier history.
+
+## Canonical checkout
+
+For this installation, the maintained checkout is `~/.local/share/whisper-ptt`. Its `.git` directory, service, virtual environment, and source live together. Any development alias must be a symlink to this directory, rather than a second clone. Runtime configuration remains under `~/.config/whisper-ptt` and is never committed.
+
+For experiments, use a branch in the canonical checkout. An experimental worktree can be used for tests, but run `install-links.sh` only from the canonical checkout. Restart the service to load daemon changes.

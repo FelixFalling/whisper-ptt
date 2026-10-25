@@ -76,6 +76,7 @@ Turning cleanup on may warm its model. Turning it off through the UI explicitly 
 ```bash
 whisper-ptt status
 whisper-ptt logs 30
+whisper-ptt logs --follow  # readable live input/output blocks
 whisper-ptt restart
 whisper-ptt polish on
 whisper-ptt polish off
@@ -84,6 +85,14 @@ whisper-ptt disable  # also disable startup at login
 python3 ~/.local/share/whisper-ptt/bin/whisper-ui.py all off
 python3 ~/.local/share/whisper-ptt/bin/whisper-ui.py all on
 ```
+
+Completed dictations now have separate **Raw input** and **Cleaned-up output**
+sections in fenced text blocks, with paragraphs preserved. Cleanup failures and
+disabled/skipped cleanup are explicitly labelled. Timing appears below the text.
+This applies to new local, streaming, and remote dictations; older log entries
+cannot recover raw input that was never saved. Use `whisper-ptt logs --follow`
+or `journalctl --user -u whisper-ptt.service -f -o cat` to avoid repeating the
+systemd prefix on every line. Press Ctrl+C to leave the viewer.
 
 ## Optional Mac client
 

@@ -7,7 +7,7 @@
 #   whisper-ptt disable  stop AND do not start at login
 #   whisper-ptt enable   start at login again
 #   whisper-ptt restart  apply a config change
-#   whisper-ptt logs [N] the last N log lines (default 40)
+#   whisper-ptt logs [N] [-f|--follow]  recent logs or a live, readable view
 #   whisper-ptt config   edit the settings, then restart to apply
 #   whisper-ptt test     run the unit tests (no keyboard, mic or GPU needed)
 #   whisper-ptt bench [--polish]
@@ -30,7 +30,17 @@ case "${1:-status}" in
   off|stop)    systemctl --user stop "$U";    echo "dictation OFF (VRAM released)" ;;
   on|start)    systemctl --user start "$U";   echo "dictation ON (ready in a few seconds)" ;;
   restart)     systemctl --user restart "$U"; echo "dictation restarted (settings reloaded)" ;;
-  logs)        journalctl --user -u "$U" -n "${2:-40}" --no-pager -o cat ;;
+  logs)        shift
+               LOG_LINES=80
+               LOG_ARGS=()
+               for arg in "$@"; do
+                 case "$arg" in
+                   -f|--follow) LOG_ARGS+=(--follow) ;;
+                   *[!0-9]*|'') echo 'usage: whisper-ptt logs [N] [-f|--follow]' >&2; exit 2 ;;
+                   *) LOG_LINES="$arg" ;;
+                 esac
+               done
+               exec journalctl --user -u "$U" -n "$LOG_LINES" --no-pager -o cat "${LOG_ARGS[@]}" ;;
   config)      "${EDITOR:-nano}" "$HOME/.config/whisper-ptt/config.json"
                echo "run 'whisper-ptt restart' to apply" ;;
   polish)      STATE="$HOME/.local/state/whisper-ptt/polish"; mkdir -p "$(dirname "$STATE")"

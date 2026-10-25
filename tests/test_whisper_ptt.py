@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 import wave
@@ -206,6 +207,37 @@ class RealKeyboardTests(unittest.TestCase):
         self.assertEqual("".join(seen), text)
 
 
+class RecorderTests(unittest.TestCase):
+    def test_stalled_source_is_aborted_and_closed_without_waiting_for_stop(self):
+        calls = []
+        recorder = W.Recorder()
+        recorder.stream = SimpleNamespace(
+            abort=lambda: calls.append("abort"), close=lambda: calls.append("close"))
+        self.assertEqual(recorder.stop().size, 0)
+        self.assertEqual(calls, ["abort", "close"])
+        self.assertIsNone(recorder.stream)
+
+    def test_abort_failure_still_closes_stream(self):
+        calls = []
+        recorder = W.Recorder()
+        def fail():
+            raise OSError("source disconnected")
+        recorder.stream = SimpleNamespace(abort=fail, close=lambda: calls.append("close"))
+        recorder.stop()
+        self.assertEqual(calls, ["close"])
+
+
+class DictationLoggingTests(unittest.TestCase):
+    def test_raw_input_is_retained_before_cleanup_and_short_entry_formatting(self):
+        kb = FakeKeyboard()
+        with patch.object(W, 'maybe_polish', return_value=('Hello there.', ' polished in 0.1s')), \
+                patch.object(W, 'log_dictation') as logged:
+            W.dictate(CFG, FakeHolder('um hello there'), W.Typer(CFG, Gate(), keyboard=kb), job())
+        self.assertEqual(logged.call_args.args[:2], ('um hello there', 'Hello there '))
+        self.assertEqual(kb.text, 'Hello there ')
+        self.assertIn('polished in', logged.call_args.kwargs['notes'][0])
+
+
 class DictationTests(unittest.TestCase):
     def make(self, recorder=None, cfg=CFG):
         jobs = queue.Queue()
@@ -235,6 +267,37 @@ class DictationTests(unittest.TestCase):
         d.handle("trigger", 1)
         d.handle("trigger", 0)
         self.assertEqual(drain(jobs), [])
+
+    def test_source_without_audio_releases_mic_and_accepts_next_press(self):
+        d, jobs = self.make()
+        d.handle("trigger", 1)
+        d.started_at -= 3
+        d.check_recording(SimpleNamespace(trigger_down=lambda: True))
+        self.assertFalse(d.recorder.running)
+        self.assertFalse(d.recording)
+        self.assertEqual(drain(jobs), [])
+        d.handle("trigger", 1)
+        self.assertTrue(d.recorder.running)
+        d.handle("trigger", 0)
+
+    def test_missed_release_closes_mic_and_queues_captured_audio(self):
+        d, jobs = self.make()
+        d.handle("trigger", 1)
+        d.started_at -= 1
+        d.recorder.blocks.append(np.ones((320, 1)))
+        d.check_recording(SimpleNamespace(trigger_down=lambda: False))
+        self.assertFalse(d.recorder.running)
+        self.assertEqual(len(drain(jobs)), 1)
+
+    def test_source_delivering_audio_keeps_recording_while_held(self):
+        d, jobs = self.make()
+        d.handle("trigger", 1)
+        d.started_at -= 3
+        d.recorder.blocks.append(np.zeros((320, 1)))
+        d.check_recording(SimpleNamespace(trigger_down=lambda: True))
+        self.assertTrue(d.recording)
+        self.assertTrue(d.recorder.running)
+        d.handle("trigger", 0)
 
     def test_a_dead_microphone_does_not_crash(self):
         d, jobs = self.make(FakeRecorder(fail=True))
@@ -519,7 +582,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.post("/transcribe", wav(), token="wrong")[0], 401)
 
     def test_a_wav_is_transcribed(self):
-        self.assertEqual(self.post("/transcribe", wav()), (200, {"text": "from the mac"}))
+        with patch.object(W, 'log_dictation') as logged:
+            self.assertEqual(self.post("/transcribe", wav()), (200, {"text": "from the mac"}))
+        self.assertEqual(logged.call_args.args[:2], ('from the mac', 'from the mac'))
+        self.assertEqual(logged.call_args.kwargs['source'], 'Remote')
 
     # BUG: a malformed Content-Length crashed the request handler with a traceback.
     def test_a_bad_length_is_a_clean_400(self):
@@ -761,8 +827,11 @@ class LiveSessionTests(unittest.TestCase):
         s.step(np.zeros(7 * SR, np.float32))
         holder.script = lambda a: [seg(" Then I left.", 0, 4.0)]
         kb = FakeKeyboard()
-        W.dictate(CFG, holder, W.Typer(CFG, Gate(), keyboard=kb), job(np.zeros(8 * SR, np.float32), s))
+        with patch.object(W, 'log_dictation') as logged:
+            W.dictate(CFG, holder, W.Typer(CFG, Gate(), keyboard=kb), job(np.zeros(8 * SR, np.float32), s))
         self.assertEqual(kb.text, "I went home. Then I left. ")
+        self.assertEqual(logged.call_args.args[0], 'I went home. Then I left.')
+        self.assertEqual(logged.call_args.args[1], kb.text)
 
     def test_it_runs_by_itself_while_he_talks(self):
         self.speech = [(0, 3.0), (3.6, 6.5)]

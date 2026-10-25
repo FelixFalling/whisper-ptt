@@ -154,8 +154,39 @@ def load_config():
     return cfg
 
 
+_log_lock = threading.Lock()
+
+
 def log(msg):
-    print(f"[whisper-ptt] {msg}", flush=True)
+    # Keep a complete dictation block together across worker threads.
+    with _log_lock:
+        print(f"[whisper-ptt] {msg}", flush=True)
+
+
+def _text_block(text):
+    # Preserve paragraphs without allowing terminal controls or a dictated
+    # Markdown fence to break the surrounding log block.
+    text = "".join(c for c in text if c in "\n\t" or not unicodedata.category(c).startswith("C"))
+    fence = "`" * max(3, 1 + max((len(m) for m in re.findall(r"`+", text)), default=0))
+    return f"{fence}text\n{text.rstrip()}\n{fence}"
+
+
+def log_dictation(raw, output, details, notes=(), source="Local"):
+    cleaned = any("polished in" in note for note in notes)
+    failed = any("polish failed" in note for note in notes)
+    if cleaned and failed:
+        label = "Output — partial cleanup (some text kept as spoken)"
+    elif failed:
+        label = "Output — as spoken (cleanup failed)"
+    elif cleaned:
+        label = "Cleaned-up output"
+    else:
+        label = "Output — as spoken (cleanup off or skipped)"
+    log(f"\n{'─' * 64}\n"
+        f"{source} dictation · {time.strftime('%H:%M:%S')}\n\n"
+        f"Raw input\n{_text_block(raw)}\n\n"
+        f"{label}\n{_text_block(output)}\n\n"
+        f"Timing: {details}\n{'─' * 64}\n")
 
 
 def keep_running(fn, *args):
@@ -253,7 +284,9 @@ class Recorder:
         if stream is None:
             return np.zeros(0, dtype=np.float32)
         try:
-            stream.stop()
+            # A stalled source may never deliver the next callback that stop()
+            # waits for. Abort capture immediately so key handling stays responsive.
+            stream.abort()
         except Exception as exc:        # microphone unplugged mid-recording
             log(f"microphone stopped badly: {exc}")
         finally:
@@ -907,6 +940,7 @@ class LiveSession:
         self.tried_to = 0           # end of the last pause a transcription has looked at
         self.pieces = []            # futures of the sealed sentences' typed text, in order
         self.history = []           # (said, typed) of the pieces polished so far, in order
+        self.cleanup_notes = []
         self.took, self.note = 0.0, ""      # for the log: the part after the last seal
         self.discarded = False
         self.stop = threading.Event()
@@ -967,9 +1001,10 @@ class LiveSession:
     def _finish(self, text):
         """Runs on the one polish thread, so pieces are done in order, each with the ones
         before it as context."""
-        typed = maybe_polish(self.cfg, text, quiet=True, polishing=self.polishing,
-                             history=self.history[-self.CONTEXT:])[0]
+        typed, note = maybe_polish(self.cfg, text, quiet=True, polishing=self.polishing,
+                                  history=self.history[-self.CONTEXT:])
         self.history.append((text, typed))
+        self.cleanup_notes.append(note)
         return typed
 
     def texts(self, audio):
@@ -987,8 +1022,11 @@ class LiveSession:
                 text = transcribe_audio(self.holder, self.cfg, audio[self.sealed_at:])
                 self.took = time.monotonic() - t0
                 done = [f.result() for f in self.pieces]        # all of history, in order
+                raw = text
                 text, self.note = maybe_polish(self.cfg, text, polishing=self.polishing,
                                                history=self.history[-self.CONTEXT:])
+                self.history.append((raw, text))
+                self.cleanup_notes.append(self.note)
                 rest.set_result(done[len(ready):] + [text])
             except Exception as exc:
                 rest.set_exception(exc)
@@ -1085,10 +1123,13 @@ def make_server(holder, cfg, host):
                 return self._reply(503, {"error": explain(exc)})
             after_success()
             took = time.time() - t0
+            raw = text
             text, note = maybe_polish(cfg, text)
-            log(f"remote {self.client_address[0]}: {audio.size / SAMPLE_RATE:.1f}s audio "
-                f"-> {took:.2f}s{note}")
-            self._reply(200, {"text": _short_entry(text, cfg["short_entry_min_words"])})
+            text = _short_entry(text, cfg["short_entry_min_words"])
+            log_dictation(raw, text,
+                          f"audio {audio.size / SAMPLE_RATE:.1f}s · transcription {took:.2f}s{note}",
+                          notes=[note], source="Remote")
+            self._reply(200, {"text": text})
 
     return ThreadingHTTPServer((host, int(cfg["server_port"])), Handler)
 
@@ -1150,6 +1191,7 @@ class Dictation:
         elif kind == "trigger" and value == 0:
             self._release()
         elif kind == "other" and self.recording:
+            log(f"recording cancelled by input code {value}")
             self.cancelled = True        # the trigger is being used as a modifier
             self._release()              # close the microphone immediately
         elif kind == "lost":
@@ -1167,6 +1209,7 @@ class Dictation:
             threading.Thread(target=warm_polisher, args=(self.cfg,), daemon=True).start()
         try:
             self.recorder.start()
+            log("microphone opened for dictation")
         except Exception as exc:
             log(f"could not open microphone: {exc}")
             notify(self.cfg, "Dictation error", str(exc), "critical")
@@ -1183,6 +1226,20 @@ class Dictation:
         if self.recording and not self.cancelled and press == self._press_id:
             notify(self.cfg, "🎙 Listening…")
 
+    def check_recording(self, devices):
+        if not self.recording:
+            return
+        held = time.time() - self.started_at
+        if held > 2.0 and not self.recorder.blocks:
+            log("microphone delivered no audio; cancelling recording")
+            self.cancelled = True
+            self._release()
+            notify(self.cfg, "Microphone unavailable",
+                   "No audio arrived. Check the input device in Sound settings.", "critical")
+        elif held > 0.2 and not devices.trigger_down():
+            log("trigger no longer held; closing microphone")
+            self._release()
+
     def _release(self):
         if not self.recording:
             return
@@ -1191,6 +1248,7 @@ class Dictation:
         audio = self.recorder.stop()
         session, self.session = self.session, None
         held = time.time() - self.started_at
+        log(f"microphone closed after {held:.2f}s; cancelled={self.cancelled}; samples={audio.size}")
         if self.cancelled or held < self.cfg["min_duration"] or audio.size == 0:
             if session:
                 session.discard()
@@ -1239,7 +1297,7 @@ def dictate(cfg, holder, typer, job):
         if job.session:
             texts = job.session.texts(job.audio)
         else:
-            text = transcribe_audio(holder, cfg, job.audio)
+            raw = text = transcribe_audio(holder, cfg, job.audio)
             took = time.monotonic() - t0
             text, note = maybe_polish(cfg, text)
             texts = [text]
@@ -1268,13 +1326,17 @@ def dictate(cfg, holder, typer, job):
     text = " ".join(typed) + (" " if cfg["trailing_space"] else "")
     done = time.monotonic() - job.released
     if job.session:
+        raw = " ".join(said for said, _ in job.session.history if said)
+        notes = job.session.cleanup_notes
         early = len(job.session.pieces)
         how = f"{job.session.took:.2f}s{job.session.note}"
         how += f", {early} sentence{'s' * (early != 1)} ready early" if early else ""
     else:
+        notes = [note]
         how = f"{took:.2f}s{note}"
-    log(f"{job.held:.1f}s audio -> {how} -> {text!r} "
-        f"(text ready {ready:.2f}s, typed by {done:.2f}s after release)")
+    log_dictation(raw, text,
+                  f"audio {job.held:.1f}s · transcription {how} · "
+                  f"ready {ready:.2f}s · typed {done:.2f}s after release", notes=notes)
 
 
 def worker(cfg, holder, jobs, typer):
@@ -1286,6 +1348,7 @@ def worker(cfg, holder, jobs, typer):
 
 def main():
     cfg = load_config()
+    log(f"microphone source: {os.environ.get('PIPEWIRE_NODE', 'system default')}")
     keycode = getattr(ecodes, cfg["key"], None)
     if keycode is None:
         log(f"unknown key {cfg['key']!r}")
@@ -1351,11 +1414,7 @@ def main():
                 event = None
             if event is not None:
                 dictation.handle(*event)
-            if (dictation.recording and
-                    time.time() - dictation.started_at > 0.2 and
-                    not devices.trigger_down()):
-                log("trigger no longer held; closing microphone")
-                dictation._release()
+            dictation.check_recording(devices)
         except Exception:
             log(f"key loop hit an unexpected error, carrying on:\n"
                 f"{traceback.format_exc().rstrip()}")

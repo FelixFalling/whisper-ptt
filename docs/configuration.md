@@ -55,6 +55,32 @@ JSON requires double quotes and does not allow comments or trailing commas. Edit
 - `polish_min_word_similarity` triggers that check below the configured similarity (current example: `0.25`). `polish_min_length_ratio` rejects output much shorter than the input (current example: `0.2`). These checks are imperfect and are not guarantees of meaning preservation.
 - `transcribe_while_talking: false` gives cleanup the complete recording. `true` processes sentence chunks during speech for lower latency.
 
+## Microphone selection and stalled capture
+
+By default, recording follows the system input source. For PipeWire's ALSA
+backend, you can pin Whisper to a particular microphone without changing other
+applications. Find its stable node name with `pactl list sources short`, then run:
+
+```bash
+systemctl --user edit whisper-ptt.service
+```
+
+Add this drop-in, replacing `YOUR_MICROPHONE_NODE_NAME` with the full name:
+
+```ini
+[Service]
+Environment=PIPEWIRE_NODE=YOUR_MICROPHONE_NODE_NAME
+```
+
+Run `systemctl --user restart whisper-ptt.service`. The startup log identifies the
+selected source. The local Blue Snowball selection is stored in a user drop-in;
+the repository does not hard-code a particular computer's microphone.
+
+A source that opens but sends no audio can make PortAudio's graceful `stop()`
+wait for a callback indefinitely. Recording now uses `abort()` before closing,
+and a two-second no-audio check cancels a stalled capture with a notification.
+Captured silence still contains samples and does not trigger this check.
+
 ## GPU use and desktop switches
 
 - `idle_unload_seconds` parks Whisper after inactivity; `0` disables idle release.

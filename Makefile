@@ -17,6 +17,7 @@ check: ## Check Python, shell, JSON, and GNOME JavaScript syntax
 test: check ## Run fast control tests with mocked systemd and Ollama
 	@cd "$(ROOT)" && $(PYTHON) -m unittest discover -s tests -p test_controls.py -v
 	@cd "$(ROOT)" && $(PYTHON) -m unittest discover -s tests -p test_short_entries.py -v
+	@cd "$(ROOT)" && $(PYTHON) -m unittest discover -s tests -p test_logging.py -v
 
 test-full: test ## Run the complete daemon suite using the virtual environment
 	@cd "$(ROOT)" && "$(VENV_PYTHON)" -m unittest discover -s tests -v
@@ -27,8 +28,8 @@ deploy: test ## Check and test, refresh links, then restart the local service
 status: ## Show service state and recent startup output
 	@systemctl --user status $(UNIT) --no-pager
 
-logs: ## Show the last 40 service log lines (can contain dictated text)
-	@journalctl --user -u $(UNIT) -n 40 --no-pager -o cat
+logs: ## Show readable input/output blocks (can contain dictated text)
+	@bash "$(ROOT)/bin/whisper-ptt" logs
 
 start: ## Enable Whisper and cleanup now, without changing login preferences
 	@$(PYTHON) "$(ROOT)/bin/whisper-ui.py" all on

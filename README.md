@@ -98,6 +98,8 @@ systemd prefix on every line. Press Ctrl+C to leave the viewer.
 
 See [mac/README.md](mac/README.md). Set a randomly generated server token and enable the desktop's Tailscale-bound server, then run `bash mac/package.sh`. The generated archive includes the token: share it privately and never commit it. The Mac client uses clipboard insertion, unlike the Linux virtual keyboard.
 
+The Mac side is a menu bar app, **Whisper PTT**, with its own Whisper and Cleanup switches; its Cleanup switch applies only to the Mac's dictations. Build it on the Mac over SSH with `make mac-app MAC=<ssh host>`, which leaves `Whisper-PTT.dmg` in the Mac's Downloads folder, or `make mac-install MAC=<ssh host>` to install and open it. It needs the Xcode Command Line Tools on the Mac.
+
 ## Development and deployment
 
 The checkout at `~/.local/share/whisper-ptt` is also the running application's source. The development alias points to this same directory. A commit or GitHub push alone does not restart the service. Python changes take effect when the process restarts; GNOME caches extension code until the next login. Private configuration stays outside the repository.
@@ -114,6 +116,8 @@ make status       # systemd status; an inactive service gives a nonzero exit sta
 make logs         # recent logs; may contain private dictated text
 make stop         # stop Whisper and cleanup, and unload cleanup model
 make start        # enable both now
+make mac-app MAC=<host>      # build the Mac menu bar app over SSH; the .dmg lands in its Downloads
+make mac-install MAC=<host>  # build it and install it in the Mac's Applications
 ```
 
 `make deploy` runs the fast tests, not GPU benchmarks or the full daemon suite. It requires the canonical checkout and an existing environment and local configuration. It starts the service even if it was off, but does not change whether it starts at login. Existing private settings are preserved. The active-process check does not guarantee the microphone or GPU model is ready: inspect `make logs` and try a dictation. When changing the daemon, run `make test-full` before deploying as well.

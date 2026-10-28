@@ -5,13 +5,13 @@ PYTHON ?= python3
 VENV_PYTHON ?= $(ROOT)/venv/bin/python
 UNIT := whisper-ptt.service
 
-.PHONY: help check test test-full deploy status logs start stop push publish update require-clean
+.PHONY: help check test test-full deploy status logs start stop push publish update require-clean mac-app mac-install
 help: ## List available commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  make %-12s %s\n", $$1, $$2}' "$(ROOT)/Makefile"
 
 check: ## Check Python, shell, JSON, and GNOME JavaScript syntax
 	@cd "$(ROOT)" && $(PYTHON) tools/check.py
-	@cd "$(ROOT)" && bash -n bin/whisper-ptt install-links.sh mac/install.sh mac/package.sh tools/deploy.sh
+	@cd "$(ROOT)" && bash -n bin/whisper-ptt install-links.sh mac/install.sh mac/package.sh mac/app/build.sh mac/app/remote-build.sh tools/deploy.sh
 	@cd "$(ROOT)" && node --input-type=module --check < gnome-extension/whisper-polish@felixfalling/extension.js
 
 test: check ## Run fast control tests with mocked systemd and Ollama
@@ -53,6 +53,14 @@ update: ## Pull committed updates from GitHub and deploy locally
 	@cd "$(ROOT)" && test -z "$$(git status --porcelain)" || { echo 'Commit or stash local changes before make update.' >&2; exit 1; }
 	@cd "$(ROOT)" && git pull --ff-only
 	@$(MAKE) --no-print-directory -C "$(ROOT)" deploy
+
+mac-app: ## Build the Mac menu bar app over SSH; the .dmg lands in the Mac's Downloads (MAC=ssh-host)
+	@test -n "$(MAC)" || { echo 'Name the Mac: make mac-app MAC=<ssh host>' >&2; exit 1; }
+	@bash "$(ROOT)/mac/app/remote-build.sh" "$(MAC)"
+
+mac-install: ## Build the Mac app over SSH and install it in the Mac's Applications (MAC=ssh-host)
+	@test -n "$(MAC)" || { echo 'Name the Mac: make mac-install MAC=<ssh host>' >&2; exit 1; }
+	@bash "$(ROOT)/mac/app/remote-build.sh" "$(MAC)" --install
 
 .PHONY: config
 config: ## Edit the central private settings file; restart to apply changes

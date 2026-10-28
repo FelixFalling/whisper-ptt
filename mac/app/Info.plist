@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Whisper PTT</string>
+	<key>CFBundleDisplayName</key>
+	<string>Whisper PTT</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.felixfalling.whisper-ptt</string>
+	<key>CFBundleExecutable</key>
+	<string>WhisperPTT</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<!-- Raise both when the app changes. A rebuild with nothing changed keeps the same
+	     signature, and with it the permissions macOS has granted. -->
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<!-- A menu bar app: no Dock icon. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Whisper PTT records while you hold the dictation key and turns your speech into text.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Whisper PTT sends your recordings to your desktop to be transcribed.</string>
+	<!-- The desktop's server speaks plain HTTP on its Tailscale address; Tailscale encrypts
+	     the connection itself. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

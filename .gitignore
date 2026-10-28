@@ -5,6 +5,10 @@ __pycache__/
 # Secrets: the Mac config holds the server token (mac/package.sh fills it in)
 mac/mac.json
 *.zip
+# Mac app build output (mac/app/build.sh)
+mac/app/.build/
+mac/app/build/
+*.dmg
 # Private: before/after pairs of real dictations (scripts write it for review)
 polish-review.md
 # Old hand-made backups; git history replaces them

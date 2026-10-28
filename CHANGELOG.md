@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add Whisper PTT.app, a menu bar app for the Mac with Whisper and Cleanup switches,
+  a welcome window for its permissions, and `make mac-app` / `make mac-install` to build
+  it on the Mac over SSH.
+- Let the Mac choose cleanup for its own dictations (`X-Whisper-Cleanup` header) and
+  report the desktop's name from `/health`.
 - Release the microphone promptly even when its source stalls; cancel captures
   that receive no audio and report the selected source at startup.
 - Show raw transcription and cleaned-up output in separate fenced log blocks,

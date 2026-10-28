@@ -102,5 +102,6 @@ The UI will create an override again the next time you use its switches. Whisper
 - `notify`, `notify_timeout_ms`: notification behavior.
 - `server`, `server_host`, `server_port`, `server_token`: optional network dictation. Keep the token private; use Tailscale and leave the server disabled if you do not need it.
 - The Mac client's separate device settings remain in `~/.config/whisper-ptt/mac.json` on the Mac.
+- The Mac app's Cleanup switch is sent with each of its requests and applies only to the Mac's dictations. The Terminal client sends none, so the desktop's cleanup setting decides for it.
 
 The Makefile and GNOME extension read the same daemon configuration and saved UI preference rather than maintaining another set of model settings. Most settings take effect on service restart; the cleanup UI preference is read for each dictation.

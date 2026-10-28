@@ -578,8 +578,36 @@ class ServerTests(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
 
+    def get(self, path, token="t0ken"):
+        req = urllib.request.Request(self.url + path, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read())
+
     def test_the_token_is_required(self):
         self.assertEqual(self.post("/transcribe", wav(), token="wrong")[0], 401)
+
+    # The Mac app shows which desktop it is connected to.
+    def test_health_names_the_desktop(self):
+        code, body = self.get("/health")
+        self.assertEqual(code, 200)
+        self.assertEqual(body["host"], os.uname().nodename)
+
+    # The Mac app's Cleanup switch (2026-10-28) decides for its own dictations; without the
+    # header, as from the Terminal client, the desktop's switch still decides.
+    def test_the_macs_cleanup_switch_overrides_the_desktops(self):
+        said = self.holder.text = "so um this is a long enough dictation to clean"
+        cleaned = "This is a long enough dictation to clean."
+        state = Path(tempfile.mkdtemp()) / "polish"
+        on, off = {"X-Whisper-Cleanup": "on"}, {"X-Whisper-Cleanup": "off"}
+        with patch.object(W, "POLISH_STATE", state), patch.object(W, "log_dictation"), \
+                patch.object(W, "polish", return_value=cleaned) as polish:
+            state.write_text("off\n")
+            self.assertEqual(self.post("/transcribe", wav())[1]["text"], said)
+            self.assertEqual(self.post("/transcribe", wav(), headers=on)[1]["text"], cleaned)
+            state.write_text("on\n")
+            self.assertEqual(self.post("/transcribe", wav(), headers=off)[1]["text"], said)
+            self.assertEqual(self.post("/transcribe", wav())[1]["text"], cleaned)
+        self.assertEqual(polish.call_count, 2)
 
     def test_a_wav_is_transcribed(self):
         with patch.object(W, 'log_dictation') as logged:

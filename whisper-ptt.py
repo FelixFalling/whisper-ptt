@@ -1085,12 +1085,19 @@ def make_server(holder, cfg, host):
             given = self.headers.get("Authorization", "")
             return hmac.compare_digest(given.encode(), f"Bearer {token}".encode())
 
+        def _cleanup(self):
+            """The Mac app's own Cleanup switch, sent with every request, so switching it
+            there leaves desktop dictation alone. Without the header (the Terminal client)
+            the desktop's switch decides."""
+            wanted = self.headers.get("X-Whisper-Cleanup", "").strip().lower()
+            return {"on": True, "off": False}.get(wanted, polish_on(cfg))
+
         def do_GET(self):
             if not self._authorized():
                 return self._reply(401, {"error": "unauthorized"})
             if self.path == "/health":
                 return self._reply(200, {"ok": True, "loaded": holder.loaded,
-                                         "model": cfg["model"]})
+                                         "model": cfg["model"], "host": os.uname().nodename})
             self._reply(404, {"error": "not found"})
 
         def do_POST(self):
@@ -1098,7 +1105,7 @@ def make_server(holder, cfg, host):
                 return self._reply(401, {"error": "unauthorized"})
             if self.path == "/warm":
                 holder.preload_async()
-                if polish_on(cfg):      # as a local press does, so the Mac skips the cold load
+                if self._cleanup():     # as a local press does, so the Mac skips the cold load
                     threading.Thread(target=warm_polisher, args=(cfg,), daemon=True).start()
                 return self._reply(200, {"ok": True})
             if self.path != "/transcribe":
@@ -1124,7 +1131,7 @@ def make_server(holder, cfg, host):
             after_success()
             took = time.time() - t0
             raw = text
-            text, note = maybe_polish(cfg, text)
+            text, note = maybe_polish(cfg, text, polishing=self._cleanup())
             text = _short_entry(text, cfg["short_entry_min_words"])
             log_dictation(raw, text,
                           f"audio {audio.size / SAMPLE_RATE:.1f}s · transcription {took:.2f}s{note}",
@@ -1139,7 +1146,10 @@ def serve(holder, cfg):
 
     POST /warm        start loading the model (the Mac calls it on key press)
     POST /transcribe  body: 16 kHz mono 16-bit WAV -> {"text": "..."}
-    GET  /health      {"ok": true, "loaded": ..., "model": ...}
+    GET  /health      {"ok": true, "loaded": ..., "model": ..., "host": ...}
+
+    Every request carries "Authorization: Bearer <server_token>". The Mac app also sends
+    "X-Whisper-Cleanup: on|off" to choose cleanup for its own dictations.
     """
     host = cfg["server_host"]
     while host == "tailscale":           # tailscaled may come up after us at login

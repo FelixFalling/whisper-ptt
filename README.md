@@ -2,6 +2,8 @@
 
 Local push-to-talk dictation for Linux and GNOME. Hold **Right Ctrl**, speak, and release to type into the focused application. Audio is transcribed with faster-whisper on an NVIDIA GPU; optional local Ollama cleanup turns rambling speech into readable writing while aiming to preserve your meaning and voice.
 
+A Mac can dictate through the same GPU: the **Whisper PTT** menu bar app sends its recordings to the desktop over Tailscale. See [Mac menu bar app](#mac-menu-bar-app).
+
 ## Desktop controls
 
 Open GNOME's top-right system menu:
@@ -94,11 +96,43 @@ cannot recover raw input that was never saved. Use `whisper-ptt logs --follow`
 or `journalctl --user -u whisper-ptt.service -f -o cat` to avoid repeating the
 systemd prefix on every line. Press Ctrl+C to leave the viewer.
 
-## Optional Mac client
+## Mac menu bar app
 
-See [mac/README.md](mac/README.md). Set a randomly generated server token and enable the desktop's Tailscale-bound server, then run `bash mac/package.sh`. The generated archive includes the token: share it privately and never commit it. The Mac client uses clipboard insertion, unlike the Linux virtual keyboard.
+**Whisper PTT.app** brings the same dictation to a Mac. Hold **right Option**, speak, and release: the Mac records, the desktop transcribes on its GPU (and cleans up the text if you want), and the Mac pastes the result where the cursor is. When the desktop is off or unreachable, the Mac transcribes locally with a slower model and no cleanup.
 
-The Mac side is a menu bar app, **Whisper PTT**, with its own Whisper and Cleanup switches; its Cleanup switch applies only to the Mac's dictations. Build it on the Mac over SSH with `make mac-app MAC=<ssh host>`, which leaves `Whisper-PTT.dmg` in the Mac's Downloads folder, or `make mac-install MAC=<ssh host>` to install and open it. It needs the Xcode Command Line Tools on the Mac.
+Click the waveform in the Mac's menu bar:
+
+| Control | What it does |
+| --- | --- |
+| **Whisper** | Turns dictation on the Mac on or off. Off, right Option is an ordinary key again. |
+| **Cleanup** | Cleaned-up text, or your words as spoken. Applies only to the Mac's dictations; the desktop's own Cleanup switch is unaffected. |
+| Desktop row | Whether the desktop answers; click to check again. |
+| **Last dictation** | Click to copy it again. |
+| **Open at Login** | Starts the app at login. |
+
+The Mac cannot switch the desktop on. If Whisper is off at the desktop, the Mac uses its local fallback until you turn it back on there (`make start` or the GNOME Whisper button).
+
+### Set up the desktop
+
+In `~/.config/whisper-ptt/config.json`, set `"server": true` and a randomly generated `server_token`, then `make deploy`. The server listens only on this machine's Tailscale address, and every request must carry the token. Run `bash mac/package.sh` to build `whisper-ptt-mac.zip`, which holds the Mac's settings file with that token: share it privately and never commit it.
+
+### Install on the Mac
+
+1. On the Mac, with Tailscale running, unzip `whisper-ptt-mac.zip` and run `mac/install.sh` once. It writes `~/.config/whisper-ptt/mac.json` and installs the local fallback.
+2. From the desktop, build the app on the Mac over SSH (the Mac needs the Xcode Command Line Tools, not Xcode):
+
+   ```bash
+   make mac-app MAC=<ssh host of the Mac>       # leaves Whisper-PTT.dmg in the Mac's Downloads
+   make mac-install MAC=<ssh host of the Mac>   # or: install into Applications and open it
+   ```
+
+3. Open the .dmg, drag **Whisper PTT** to **Applications**, and open it. A welcome window asks for Microphone, Accessibility, and Input Monitoring, ticking each as it is allowed.
+
+The Mac pastes through the clipboard and then restores what was on it, unlike the Linux virtual keyboard.
+
+### Change the app
+
+The Swift source is in `mac/app`. Edit it, raise the version in `mac/app/Info.plist`, and rebuild with `make mac-app` or `make mac-install`. The app is signed ad hoc, without an Apple developer account, so macOS asks for its permissions again after each changed build. [mac/README.md](mac/README.md) covers the source layout, the `--check` and `--snapshot` diagnostics, the Mac settings, and the older Terminal client.
 
 ## Development and deployment
 

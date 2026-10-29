@@ -12,6 +12,7 @@
 - Show raw transcription and cleaned-up output in separate fenced log blocks,
   including cleanup fallback status, paragraphs, and timing.
 - Add `whisper-ptt logs --follow` for readable live logs.
+- Stop showing a "Polishing…" notification before every cleanup.
 
 - Publish the Linux push-to-talk daemon, Mac client, systemd integration, and tests.
 - Add Whisper and Cleanup controls to GNOME Quick Settings.

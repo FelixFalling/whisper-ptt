@@ -887,8 +887,6 @@ def maybe_polish(cfg, text, quiet=False, polishing=None, history=()):
         polishing = polish_on(cfg)
     if not text or not polishing or len(_words(text)) < cfg["polish_min_words"]:
         return text, ""
-    if not quiet:
-        notify(cfg, "✨ Polishing…")
     t0 = time.time()
     try:
         return polish(cfg, text, history), f" polished in {time.time() - t0:.2f}s"

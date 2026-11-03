@@ -3,6 +3,7 @@
   "name": "Whisper Controls",
   "description": "Whisper power and optional cleanup controls, with model unloading when turned off.",
   "shell-version": [
-    "50"
+    "50",
+    "51"
   ]
 }

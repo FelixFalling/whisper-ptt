@@ -54,6 +54,11 @@ class FakeRecorder:
         return np.ones(3200, dtype=np.float32)
 
 
+MICS = [("alsa_input.usb-BLUE_MICROPHONE_Blue_Snowball_201204-00.mono-fallback",
+         "Blue Snowball Mono"),
+        ("alsa_input.pci-0000_0a_00.4.analog-stereo", "Starship/Matisse HD Audio Controller")]
+
+
 def seg(text, start=0.0, end=1.0):
     return SimpleNamespace(text=text, start=start, end=end)
 
@@ -306,6 +311,46 @@ class DictationTests(unittest.TestCase):
         d.handle("trigger", 0)
         self.assertEqual(drain(jobs), [])
 
+    # BUG: with the chosen mic unplugged, PipeWire recorded a silent default source and
+    # every press said "nothing recognised" instead of naming the missing microphone.
+    def test_an_unplugged_microphone_is_reported_not_recorded(self):
+        d, jobs = self.make(cfg={**CFG, "microphone": "Snowball"})
+        with patch.object(W, "list_microphones", return_value=MICS[1:]), \
+             patch.object(W, "notify") as notify:
+            d.handle("trigger", 1)
+        self.assertFalse(d.recording)
+        self.assertFalse(d.recorder.running)
+        self.assertIn("Snowball", notify.call_args.args[2])
+        d.handle("trigger", 0)
+        self.assertEqual(drain(jobs), [])
+
+    def test_an_unplugged_microphone_can_fall_back_to_the_default(self):
+        d, jobs = self.make(cfg={**CFG, "microphone": "Snowball", "microphone_fallback": True})
+        with patch.object(W, "list_microphones", return_value=MICS[1:]), \
+             patch.dict(os.environ, {"PIPEWIRE_NODE": "stale"}):
+            d.handle("trigger", 1)
+            self.assertNotIn("PIPEWIRE_NODE", os.environ)
+        self.assertTrue(d.recorder.running)
+        d.handle("trigger", 0)
+
+    def test_the_chosen_microphone_is_found_by_part_of_its_name(self):
+        d, jobs = self.make(cfg={**CFG, "microphone": "snowball"})
+        with patch.object(W, "list_microphones", return_value=MICS), \
+             patch.dict(os.environ, {}):
+            d.handle("trigger", 1)
+            self.assertEqual(os.environ.get("PIPEWIRE_NODE"), MICS[0][0])
+        self.assertTrue(d.recorder.running)
+        d.handle("trigger", 0)
+
+    def test_no_choice_or_no_pactl_still_records(self):
+        for cfg, mics in ((CFG, MICS[1:]), ({**CFG, "microphone": "Snowball"}, None)):
+            d, jobs = self.make(cfg=cfg)
+            with patch.object(W, "list_microphones", return_value=mics), \
+                 patch.dict(os.environ, {}):
+                d.handle("trigger", 1)
+            self.assertTrue(d.recorder.running, cfg)
+            d.handle("trigger", 0)
+
     # BUG: a keyboard unplugged mid-press never sent its release, so typing waited forever.
     def test_a_lost_keyboard_ends_the_press(self):
         d, jobs = self.make()
@@ -335,6 +380,30 @@ class DictationTests(unittest.TestCase):
         self.assertEqual(drain(jobs), [])
         session.thread.join(1)
         self.assertFalse(session.thread.is_alive())
+
+
+class MicrophoneTests(unittest.TestCase):
+    def test_find_prefers_an_exact_name_then_any_part_of_name_or_description(self):
+        self.assertEqual(W.find_microphone(MICS[1][0], MICS), MICS[1])
+        self.assertEqual(W.find_microphone("SNOWBALL", MICS), MICS[0])
+        self.assertEqual(W.find_microphone("matisse", MICS), MICS[1])
+        self.assertIsNone(W.find_microphone("yeti", MICS))
+
+    def test_mic_label(self):
+        self.assertEqual(W.mic_label(MICS[0][0]), "BLUE MICROPHONE Blue Snowball")
+        self.assertEqual(W.mic_label("Snowball"), "Snowball")
+
+    def test_mic_command_saves_the_choice_and_keeps_other_settings(self):
+        path = Path(tempfile.mkdtemp()) / "config.json"
+        path.write_text(json.dumps({"key": "KEY_F9"}))
+        with patch.object(W, "CONFIG_PATH", path), \
+             patch.object(W, "list_microphones", return_value=MICS), \
+             patch("sys.stdout", io.StringIO()):
+            W.mic_command(["snowball"], restart=False)
+            self.assertEqual(json.loads(path.read_text()),
+                             {"key": "KEY_F9", "microphone": "snowball"})
+            W.mic_command(["default"], restart=False)
+            self.assertEqual(json.loads(path.read_text())["microphone"], "")
 
 
 # BUG: a transcription error (a full GPU) killed the whole service.

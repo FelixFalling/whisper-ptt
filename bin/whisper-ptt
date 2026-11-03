@@ -9,6 +9,8 @@
 #   whisper-ptt restart  apply a config change
 #   whisper-ptt logs [N] [-f|--follow]  recent logs or a live, readable view
 #   whisper-ptt config   edit the settings, then restart to apply
+#   whisper-ptt mic [NAME|default]
+#                        list microphones, or record from the one whose name contains NAME
 #   whisper-ptt test     run the unit tests (no keyboard, mic or GPU needed)
 #   whisper-ptt bench [--polish]
 #                        speed and accuracy on the GPU with spoken test sentences
@@ -62,6 +64,8 @@ case "${1:-status}" in
                [ "${2:-status}" != status ] && [ "${3:-}" != --quiet ] && notify-send -a whisper-ptt -e -t 2000 \
                  "Polish ${MODE^^}" "$( [ "$MODE" = on ] && echo 'Grammar gets cleaned up' || echo 'Typed as spoken')" 2>/dev/null || true
                echo "polish: $MODE" ;;
+  mic)         exec "$HOME/.local/share/whisper-ptt/venv/bin/python" \
+                 "$HOME/.local/share/whisper-ptt/whisper-ptt.py" mic "${@:2}" ;;
   test)        "$HOME/.local/share/whisper-ptt/venv/bin/python" -m unittest discover \
                  -s "$HOME/.local/share/whisper-ptt/tests" ;;
   bench)       "$HOME/.local/share/whisper-ptt/venv/bin/python" \

@@ -57,24 +57,28 @@ JSON requires double quotes and does not allow comments or trailing commas. Edit
 
 ## Microphone selection and stalled capture
 
-By default, recording follows the system input source. For PipeWire's ALSA
-backend, you can pin Whisper to a particular microphone without changing other
-applications. Find its stable node name with `pactl list sources short`, then run:
+By default, recording follows the system input source. To pin Whisper to one
+microphone without changing other applications, list what is connected and pick
+one by any part of its name:
 
 ```bash
-systemctl --user edit whisper-ptt.service
+whisper-ptt mic             # list microphones; * marks the one in use
+whisper-ptt mic snowball    # record from the first one whose name contains "snowball"
+whisper-ptt mic default     # follow the system input again
 ```
 
-Add this drop-in, replacing `YOUR_MICROPHONE_NODE_NAME` with the full name:
+This saves `"microphone"` in `config.json` and restarts the service. The name is
+matched, ignoring case, against each PipeWire source's node name and description
+every time you press the key, so the choice survives replugging into another port.
 
-```ini
-[Service]
-Environment=PIPEWIRE_NODE=YOUR_MICROPHONE_NODE_NAME
-```
+When the chosen microphone is not connected, dictation does not record a silent
+default source. It shows "Microphone not connected" at startup and on each press,
+and works again on the next press after it is plugged in. Set
+`"microphone_fallback": true` to record from the system default instead, with a
+notification saying so.
 
-Run `systemctl --user restart whisper-ptt.service`. The startup log identifies the
-selected source. The local Blue Snowball selection is stored in a user drop-in;
-the repository does not hard-code a particular computer's microphone.
+An older setup that sets `PIPEWIRE_NODE` in a service drop-in still works and is
+used when `"microphone"` is empty.
 
 A source that opens but sends no audio can make PortAudio's graceful `stop()`
 wait for a callback indefinitely. Recording now uses `abort()` before closing,

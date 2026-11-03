@@ -102,6 +102,13 @@ DEFAULTS = {
     # Milliseconds per key, held and between keys. 2 types twice as fast as the old 4;
     # raise it if an app drops characters.
     "type_delay_ms": 2,
+    # Which microphone to record from: "" follows the system default input, otherwise
+    # a PipeWire source's node name or any part of its name ("Snowball"). Set it with
+    # `whisper-ptt mic NAME`; `whisper-ptt mic` lists what is connected.
+    "microphone": "",
+    # When that microphone is unplugged: False refuses to record and says so; True
+    # records from the system default instead (and says so).
+    "microphone_fallback": False,
     "notify": True,
     "notify_timeout_ms": 1500,
     "trailing_space": True,
@@ -251,6 +258,76 @@ def notifier():
 
 # ------------------------------------------------------------------ audio
 SAMPLE_RATE = 16000
+
+
+# A PIPEWIRE_NODE set in the service environment (the older way to choose a microphone),
+# kept aside because pick_microphone() rewrites the variable before every recording.
+ENV_MICROPHONE = os.environ.get("PIPEWIRE_NODE", "")
+
+
+def list_microphones():
+    """[(node name, description)] of PipeWire input sources; None when pactl cannot say."""
+    try:
+        out = subprocess.run(["pactl", "--format=json", "list", "sources"],
+                             capture_output=True, text=True, timeout=2)
+        sources = json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if not isinstance(sources, list):
+        return None
+    return [(s["name"], s.get("description") or s["name"]) for s in sources
+            if "name" in s and not s["name"].endswith(".monitor")]
+
+
+def find_microphone(wanted, mics):
+    """The (name, description) that `wanted` names: the exact node name, else the first
+    source whose name or description contains it, ignoring case ("snowball")."""
+    w = wanted.casefold()
+    for mic in mics:
+        if mic[0].casefold() == w:
+            return mic
+    for mic in mics:
+        if w in mic[0].casefold() or w in mic[1].casefold():
+            return mic
+    return None
+
+
+def mic_label(node):
+    """A readable name for a PipeWire node, e.g. "BLUE MICROPHONE Blue Snowball"."""
+    m = re.match(r"alsa_input\.(?:usb|pci)-(.+?)(?:_[0-9A-Fa-f]+)?-\d+\.", node)
+    return m.group(1).replace("_", " ") if m else node
+
+
+def wanted_microphone(cfg):
+    return (cfg.get("microphone") or "").strip() or ENV_MICROPHONE
+
+
+def pick_microphone(cfg):
+    """(node, description, missing) for the next recording.
+
+    node None means the system default input. missing is a readable name when the chosen
+    microphone is not connected: PipeWire would otherwise quietly record the default
+    source (often a silent line-in), and every press came back "nothing recognised".
+    """
+    wanted = wanted_microphone(cfg)
+    if not wanted:
+        return None, None, None
+    mics = list_microphones()
+    if mics is None:                     # cannot check: pass an exact name through as before
+        return (wanted, wanted, None) if wanted == ENV_MICROPHONE else (None, None, None)
+    found = find_microphone(wanted, mics)
+    if found:
+        return found[0], found[1], None
+    return None, None, mic_label(wanted)
+
+
+def use_microphone(node):
+    """Point the next sd.InputStream at `node` (None: system default). The PipeWire ALSA
+    plugin reads PIPEWIRE_NODE whenever a stream opens, so no restart is needed."""
+    if node:
+        os.environ["PIPEWIRE_NODE"] = node
+    else:
+        os.environ.pop("PIPEWIRE_NODE", None)
 
 
 class Recorder:
@@ -1192,6 +1269,7 @@ class Dictation:
         self.started_at = 0.0
         self.session = None
         self._press_id = 0
+        self._mic = None                 # the microphone last recorded from, for the log
 
     def handle(self, kind, value):
         if kind == "trigger" and value == 1:
@@ -1209,6 +1287,21 @@ class Dictation:
     def _press(self):
         if self.recording:
             return
+        node, description, missing = pick_microphone(self.cfg)
+        if missing and not self.cfg.get("microphone_fallback"):
+            log(f"microphone {missing} is not connected; not recording")
+            notify(self.cfg, "Microphone not connected",
+                   f"{missing} isn't plugged in. Plug it in and press again.", "critical")
+            return
+        if missing:
+            description = "the system default microphone"
+            if self._mic != description:
+                notify(self.cfg, "Using the default microphone", f"{missing} isn't plugged in.")
+        description = description or "the system default microphone"
+        if self._mic != description:
+            log(f"recording from {description}" + (f" ({missing} is not connected)" if missing else ""))
+            self._mic = description
+        use_microphone(node)
         self.recording, self.cancelled, self.started_at = True, False, time.time()
         self._press_id += 1
         self.holder.preload_async()      # overlap any reload with the user speaking
@@ -1356,7 +1449,7 @@ def worker(cfg, holder, jobs, typer):
 
 def main():
     cfg = load_config()
-    log(f"microphone source: {os.environ.get('PIPEWIRE_NODE', 'system default')}")
+    log(f"microphone source: {wanted_microphone(cfg) or 'system default'}")
     keycode = getattr(ecodes, cfg["key"], None)
     if keycode is None:
         log(f"unknown key {cfg['key']!r}")
@@ -1403,7 +1496,17 @@ def main():
         log(f"GPU released after {idle_s}s idle")
     else:
         holder._load_quietly()
-    notify(cfg, "Dictation ready", f"Hold {cfg['key'].replace('KEY_', '')} to talk")
+    _, _, missing = pick_microphone(cfg)
+    if missing and not cfg.get("microphone_fallback"):
+        log(f"microphone {missing} is not connected; dictation waits until it is plugged in")
+        notify(cfg, "Microphone not connected",
+               f"{missing} isn't plugged in. Dictation will work once it is.", "critical")
+    elif missing:
+        log(f"microphone {missing} is not connected; using the system default until it is")
+        notify(cfg, "Dictation ready", f"{missing} isn't plugged in, so the default "
+               "microphone will be used.")
+    else:
+        notify(cfg, "Dictation ready", f"Hold {cfg['key'].replace('KEY_', '')} to talk")
 
     if cfg["server"]:
         if cfg["server_token"]:
@@ -1428,5 +1531,48 @@ def main():
                 f"{traceback.format_exc().rstrip()}")
 
 
+def mic_command(args, restart=True):
+    """`whisper-ptt mic [NAME|default]`: list microphones, or choose one and restart."""
+    config_path = CONFIG_PATH
+    cfg = load_config()
+    mics = list_microphones()
+    if not args:
+        wanted = wanted_microphone(cfg)
+        chosen = find_microphone(wanted, mics or []) if wanted else None
+        print(f"chosen: {wanted or 'system default'}"
+              + ("" if not wanted or chosen else "  (NOT CONNECTED)"))
+        if mics is None:
+            print("could not list microphones (is pactl installed?)")
+            return 1
+        for name, desc in mics:
+            print(f"{'*' if chosen and chosen[0] == name else ' '} {desc}\n    {name}")
+        print("\nchoose one with: whisper-ptt mic NAME  (any part of the name works)"
+              "\nfollow the system default with: whisper-ptt mic default")
+        return 0
+    wanted = " ".join(args).strip()
+    if wanted.casefold() in ("default", "system", "none"):
+        wanted = ""
+    elif mics is not None:
+        found = find_microphone(wanted, mics)
+        if found:
+            print(f"matches: {found[1]}")
+        else:
+            print(f"warning: nothing connected matches {wanted!r}; saved anyway, "
+                  "dictation will say so until it is plugged in")
+    saved = json.loads(config_path.read_text()) if config_path.exists() else {}
+    saved["microphone"] = wanted
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(saved, indent=2, ensure_ascii=False) + "\n")
+    print(f"microphone: {wanted or 'system default'}")
+    if ENV_MICROPHONE and not wanted:
+        print(f"note: the service environment still sets PIPEWIRE_NODE={ENV_MICROPHONE}")
+    if restart:
+        subprocess.run(["systemctl", "--user", "try-restart", "whisper-ptt.service"])
+        print("dictation restarted if it was running")
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["mic"]:
+        sys.exit(mic_command(sys.argv[2:]))
     sys.exit(main() or 0)

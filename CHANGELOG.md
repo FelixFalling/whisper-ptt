@@ -13,6 +13,13 @@
   including cleanup fallback status, paragraphs, and timing.
 - Add `whisper-ptt logs --follow` for readable live logs.
 - Stop showing a "Polishing…" notification before every cleanup.
+- Support GNOME Shell 51 in the Whisper Controls extension, and warn from `make deploy`
+  when the running GNOME version is missing from its metadata.
+- Choose the microphone with `whisper-ptt mic NAME` (any part of its name) or the
+  `microphone` setting; `whisper-ptt mic` lists what is connected.
+- Say "Microphone not connected" (at startup and on each press) when the chosen
+  microphone is unplugged, instead of recording a silent default source;
+  `microphone_fallback: true` uses the system default instead.
 
 - Publish the Linux push-to-talk daemon, Mac client, systemd integration, and tests.
 - Add Whisper and Cleanup controls to GNOME Quick Settings.

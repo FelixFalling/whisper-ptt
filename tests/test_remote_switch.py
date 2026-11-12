@@ -135,6 +135,9 @@ class RemoteSwitchTests(unittest.TestCase):
         self.assertEqual(C.control_port({}), 8766)
         self.assertEqual(C.control_port({"server_port": 9000}), 9001)
         self.assertEqual(C.control_port({"server_port": 9000, "control_port": 9100}), 9100)
+        # A setting that is no port must not stop the switch from starting.
+        self.assertEqual(C.control_port({"control_port": "abc", "server_port": "x"}), 8766)
+        self.assertEqual(C.control_port({"control_port": None, "server_port": 9000}), 9001)
 
 
 if __name__ == "__main__":

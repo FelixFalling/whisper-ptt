@@ -11,7 +11,7 @@ help: ## List available commands
 
 check: ## Check Python, shell, JSON, and GNOME JavaScript syntax
 	@cd "$(ROOT)" && $(PYTHON) tools/check.py
-	@cd "$(ROOT)" && bash -n bin/whisper-ptt install-links.sh mac/install.sh mac/package.sh mac/app/build.sh mac/app/remote-build.sh tools/deploy.sh
+	@cd "$(ROOT)" && bash -n bin/whisper-ptt install-links.sh mac/install.sh mac/package.sh mac/app/build.sh mac/app/signing.sh mac/app/remote-build.sh tools/deploy.sh tools/shell-rig.sh
 	@cd "$(ROOT)" && node --input-type=module --check < gnome-extension/whisper-polish@felixfalling/extension.js
 
 test: check ## Run fast control tests with mocked systemd and Ollama

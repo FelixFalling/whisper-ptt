@@ -13,6 +13,9 @@ MemorySwapMax=0
 ExecStart=%h/.local/share/whisper-ptt/venv/bin/python %h/.local/share/whisper-ptt/whisper-ptt.py
 Restart=on-failure
 RestartSec=5
+# It stops at once on SIGTERM. If it ever does not (a GPU call that hangs), switching
+# Whisper off must not sit there for systemd's default minute and a half.
+TimeoutStopSec=15
 
 [Install]
 WantedBy=graphical-session.target

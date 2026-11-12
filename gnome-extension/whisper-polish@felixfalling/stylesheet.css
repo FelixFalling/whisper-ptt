@@ -1,0 +1,8 @@
+/* The top-bar microphone while dictation is recording, and when something needs attention. */
+.whisper-ptt-recording {
+    color: #ff7b63;
+}
+
+.whisper-ptt-problem {
+    color: #f8e45c;
+}

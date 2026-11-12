@@ -19,4 +19,4 @@ jobs:
       - run: python -m unittest discover -s tests -p test_short_entries.py -v
       - run: python -m unittest discover -s tests -p test_logging.py -v
       - run: node --input-type=module --check < gnome-extension/whisper-polish@felixfalling/extension.js
-      - run: bash -n bin/whisper-ptt install-links.sh mac/install.sh mac/package.sh mac/app/build.sh mac/app/remote-build.sh tools/deploy.sh
+      - run: bash -n bin/whisper-ptt install-links.sh mac/install.sh mac/package.sh mac/app/build.sh mac/app/signing.sh mac/app/remote-build.sh tools/deploy.sh tools/shell-rig.sh

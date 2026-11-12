@@ -35,7 +35,7 @@ spec.loader.exec_module(W)
 W.POLISH_STATE = Path(tempfile.mkdtemp()) / "polish"
 CFG = {**W.DEFAULTS, "min_duration": 0.05, "notify": False, "server_token": "t0ken",
        "server_port": 0, "polish": False, "ollama_url": "http://127.0.0.1:9",
-       "transcribe_while_talking": False}
+       "transcribe_while_talking": False, "require_desktop_session": False}
 SR = W.SAMPLE_RATE
 DECODE = {v: k for k, v in W.KEYMAP.items()}
 
@@ -69,9 +69,10 @@ class FakeHolder:
     def __init__(self, text="hello", error=None, script=None):
         self.text, self.error, self.script, self.loaded = text, error, script, True
         self.heard = []                     # lengths of the audio it was asked about
+        self.woken = 0                      # times a press asked for the model
 
     def preload_async(self):
-        pass
+        self.woken += 1
 
     def get(self):
         if self.error:
@@ -351,6 +352,75 @@ class DictationTests(unittest.TestCase):
             self.assertTrue(d.recorder.running, cfg)
             d.handle("trigger", 0)
 
+    # Right Ctrl is a modifier too. 150 of 224 presses in his journal were shortcuts, and
+    # each one moved Whisper back onto the GPU and loaded the polish model (2026-11-12).
+    def test_a_shortcut_wakes_no_model(self):
+        d, jobs = self.make(cfg={**CFG, "polish": True, "min_duration": 0.3})
+        with patch.object(W, "WARM_AFTER", 0.1), patch.object(W, "warm_polisher") as polisher:
+            d.handle("trigger", 1)
+            d.handle("other", 46)               # Ctrl+C
+            d.handle("trigger", 0)
+            time.sleep(0.25)
+            self.assertEqual(d.holder.woken, 0)
+            polisher.assert_not_called()
+
+    # Found in review: a tap released before the wait was over still woke both models,
+    # because only a second key marked the press as cancelled.
+    def test_a_bare_tap_wakes_no_model(self):
+        d, jobs = self.make(cfg={**CFG, "polish": True, "min_duration": 0.3})
+        with patch.object(W, "WARM_AFTER", 0.1), patch.object(W, "warm_polisher") as polisher:
+            d.handle("trigger", 1)
+            time.sleep(0.03)
+            d.handle("trigger", 0)
+            time.sleep(0.25)
+            self.assertEqual(d.holder.woken, 0)
+            polisher.assert_not_called()
+        self.assertEqual(drain(jobs), [])
+
+    def test_a_dictation_wakes_the_models_while_he_is_still_talking(self):
+        d, jobs = self.make(cfg={**CFG, "polish": True, "min_duration": 0.3})
+        with patch.object(W, "WARM_AFTER", 0.1), patch.object(W, "warm_polisher") as polisher:
+            d.handle("trigger", 1)
+            self.assertEqual(d.holder.woken, 0)
+            time.sleep(0.25)
+            self.assertEqual(d.holder.woken, 1, "not woken while the key was held")
+            polisher.assert_called_once()
+            time.sleep(0.15)
+            d.handle("trigger", 0)
+            self.assertEqual(d.holder.woken, 1, "woken twice for one press")
+        self.assertEqual(len(drain(jobs)), 1)
+
+    def test_a_dictation_released_before_the_wait_is_over_still_wakes_them(self):
+        d, jobs = self.make()                   # min_duration 0.05
+        with patch.object(W, "WARM_AFTER", 5):
+            d.handle("trigger", 1)
+            time.sleep(0.1)
+            d.handle("trigger", 0)
+        self.assertEqual(d.holder.woken, 1)
+        self.assertEqual(len(drain(jobs)), 1)
+
+    # The Mac can switch the service on with nobody logged in at the desktop. Right Ctrl at
+    # the login screen must not record whoever is there and type it into the password field.
+    def test_the_key_is_ignored_without_his_desktop_session_on_screen(self):
+        d, jobs = self.make(cfg={**CFG, "require_desktop_session": True})
+        with patch.object(W, "desktop_session_active", return_value=False):
+            d.handle("trigger", 1)
+            self.assertFalse(d.recording)
+            self.assertFalse(d.recorder.running)
+            d.handle("trigger", 0)
+        self.assertEqual(drain(jobs), [])
+        with patch.object(W, "desktop_session_active", return_value=True):
+            d.handle("trigger", 1)
+            self.assertTrue(d.recorder.running)
+            d.handle("trigger", 0)
+
+    def test_the_session_check_can_be_switched_off(self):
+        d, jobs = self.make(cfg={**CFG, "require_desktop_session": False})
+        with patch.object(W, "desktop_session_active", return_value=False):
+            d.handle("trigger", 1)
+        self.assertTrue(d.recorder.running)
+        d.handle("trigger", 0)
+
     # BUG: a keyboard unplugged mid-press never sent its release, so typing waited forever.
     def test_a_lost_keyboard_ends_the_press(self):
         d, jobs = self.make()
@@ -404,6 +474,191 @@ class MicrophoneTests(unittest.TestCase):
                              {"key": "KEY_F9", "microphone": "snowball"})
             W.mic_command(["default"], restart=False)
             self.assertEqual(json.loads(path.read_text())["microphone"], "")
+
+    # The GNOME menu lists the microphones from this.
+    def test_mic_command_lists_microphones_as_json(self):
+        path = Path(tempfile.mkdtemp()) / "config.json"
+        path.write_text(json.dumps({"microphone": "snowball"}))
+        out = io.StringIO()
+        with patch.object(W, "CONFIG_PATH", path), patch.object(W, "ENV_MICROPHONE", ""), \
+             patch.object(W, "list_microphones", return_value=MICS), patch("sys.stdout", out):
+            W.mic_command(["--json"])
+        listed = json.loads(out.getvalue())
+        self.assertEqual([m["chosen"] for m in listed["microphones"]], [True, False])
+        self.assertTrue(listed["connected"])
+        out = io.StringIO()
+        with patch.object(W, "CONFIG_PATH", path), patch.object(W, "ENV_MICROPHONE", ""), \
+             patch.object(W, "list_microphones", return_value=MICS[1:]), patch("sys.stdout", out):
+            W.mic_command(["--json"])
+        self.assertFalse(json.loads(out.getvalue())["connected"])
+
+    # A remark about the settings on stdout would stop the GNOME menu parsing the list.
+    def test_the_json_list_stays_json_when_the_settings_have_a_typo(self):
+        path = Path(tempfile.mkdtemp()) / "config.json"
+        path.write_text(json.dumps({"microfone": "snowball"}))
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(W, "CONFIG_PATH", path), patch.object(W, "ENV_MICROPHONE", ""), \
+             patch.object(W, "list_microphones", return_value=MICS), \
+             patch("sys.stdout", out), patch("sys.stderr", err):
+            W.mic_command(["--json"])
+        self.assertEqual(len(json.loads(out.getvalue())["microphones"]), 2)
+        self.assertIn("microfone", err.getvalue())
+
+
+class ConfigTests(unittest.TestCase):
+    def load(self, text):
+        path = Path(tempfile.mkdtemp()) / "config.json"
+        path.write_text(text)
+        logged = []
+        with patch.object(W, "CONFIG_PATH", path), patch.object(W, "log", logged.append):
+            return W.load_config(), "\n".join(logged)
+
+    def test_good_settings_are_taken_quietly(self):
+        cfg, logged = self.load(json.dumps({"key": "KEY_F9", "min_duration": 1, "polish": False,
+                                            "polish_prompt": "Edit.", "control_port": 9000,
+                                            "server_port": 8765, "polish_timeout": 120,
+                                            "polish_min_word_similarity": 0.25}))
+        self.assertEqual((cfg["key"], cfg["min_duration"], cfg["polish"], cfg["polish_prompt"]),
+                         ("KEY_F9", 1, False, "Edit."))
+        self.assertEqual(logged, "")
+
+    # BUG: "type_delay_ms": "2" was taken as it was and failed on every dictation.
+    def test_a_setting_of_the_wrong_kind_is_named_and_the_default_used(self):
+        cfg, logged = self.load(json.dumps({"type_delay_ms": "2", "notify": "yes", "beam_size": 0,
+                                            "min_duration": -1, "server_port": 8765.5,
+                                            "short_entry_min_words": True, "model": 3,
+                                            "control_port": "8766", "polish_prompt": 7}))
+        for name in ("type_delay_ms", "notify", "min_duration", "server_port",
+                     "short_entry_min_words", "model", "control_port", "polish_prompt"):
+            self.assertEqual(cfg[name], W.DEFAULTS[name], name)
+            self.assertIn(name, logged)
+        self.assertEqual(cfg["beam_size"], 1)
+
+    # Found in review: the first version of the check threw these out, and they all worked.
+    def test_values_that_always_worked_still_do(self):
+        cfg, logged = self.load(json.dumps({
+            "language": None, "initial_prompt": None, "microphone": None,
+            "polish_keep_alive": -1, "type_delay_ms": 1.5, "polish_timeout": 2.5,
+            "idle_unload_seconds": 300.0, "server_port": 8765.0, "min_duration": 0}))
+        self.assertEqual(logged, "")
+        self.assertIsNone(cfg["language"])
+        self.assertEqual((cfg["polish_keep_alive"], cfg["type_delay_ms"], cfg["server_port"]),
+                         (-1, 1.5, 8765))
+        self.assertIs(type(cfg["server_port"]), int)
+        cfg, logged = self.load(json.dumps({"polish_keep_alive": 300, "key": None, "model": None}))
+        self.assertEqual(cfg["polish_keep_alive"], 300)
+        self.assertEqual((cfg["key"], cfg["model"]), (W.DEFAULTS["key"], W.DEFAULTS["model"]))
+
+    def test_an_unknown_setting_is_called_out_as_a_likely_typo(self):
+        cfg, logged = self.load(json.dumps({"polsih": True}))
+        self.assertIn("polsih", logged)
+        self.assertNotIn("polsih", cfg)
+
+    def test_a_file_that_is_not_an_object_or_not_json_falls_back_to_defaults(self):
+        for text in ("[1, 2]", "{broken", '"just a string"'):
+            cfg, logged = self.load(text)
+            self.assertEqual(cfg, W.DEFAULTS, text)
+            self.assertIn("config unreadable", logged)
+
+    def test_the_example_file_is_all_known_settings_of_the_right_kind(self):
+        example = Path(__file__).resolve().parent.parent / "config.example.json"
+        cfg, logged = self.load(example.read_text())
+        self.assertEqual(logged, "")
+
+
+class StatusTests(unittest.TestCase):
+    """status.json, which the GNOME indicator watches."""
+
+    def setUp(self):
+        self.path = Path(tempfile.mkdtemp()) / "run" / "status.json"
+        self.status = W.Status(self.path)
+        patcher = patch.object(W, "STATUS", self.status)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def read(self):
+        return json.loads(self.path.read_text())
+
+    def test_it_follows_a_dictation_from_press_to_typed_text(self):
+        self.status.update(ready=True)
+        self.assertEqual(self.read()["state"], "idle")
+        jobs = queue.Queue()
+        d = W.Dictation(CFG, FakeHolder("hello there"), FakeRecorder(), jobs)
+        d.handle("trigger", 1)
+        self.assertEqual(self.read()["state"], "idle", "a tap or a shortcut must not flash the indicator")
+        time.sleep(0.15)
+        self.assertEqual(self.read()["state"], "recording")
+        d.handle("trigger", 0)
+        self.assertEqual(self.read()["state"], "working")
+        kb = FakeKeyboard()
+        threading.Thread(target=W.worker, args=(CFG, d.holder, jobs, W.Typer(CFG, Gate(), keyboard=kb)),
+                         daemon=True).start()
+        time.sleep(0.3)
+        now = self.read()
+        self.assertEqual((now["state"], now["last"]), ("idle", "hello there"))
+        self.assertEqual(now["pid"], os.getpid())
+
+    def test_a_cancelled_press_goes_back_to_idle(self):
+        self.status.update(ready=True)
+        d = W.Dictation(CFG, FakeHolder(), FakeRecorder(), queue.Queue())
+        d.handle("trigger", 1)
+        time.sleep(0.15)
+        d.handle("other", 46)
+        self.assertEqual(self.read()["state"], "idle")
+
+    def test_a_failed_dictation_leaves_a_note_and_is_not_stuck_working(self):
+        self.status.update(ready=True, busy=1)
+        jobs = queue.Queue()
+        holder = FakeHolder(error=RuntimeError("CUDA failed with error out of memory"))
+        threading.Thread(target=W.worker, args=(CFG, holder, jobs, W.Typer(CFG, Gate(), keyboard=FakeKeyboard())),
+                         daemon=True).start()
+        jobs.put(job())
+        time.sleep(0.3)
+        now = self.read()
+        self.assertEqual(now["state"], "idle")
+        self.assertIn("graphics card is full", now["note"])
+
+    def test_an_unplugged_microphone_is_noted_until_a_dictation_works(self):
+        self.status.update(ready=True)
+        d = W.Dictation({**CFG, "microphone": "Snowball"}, FakeHolder(), FakeRecorder(), queue.Queue())
+        with patch.object(W, "list_microphones", return_value=MICS[1:]):
+            d.handle("trigger", 1)
+        self.assertIn("not connected", self.read()["note"])
+        with patch.object(W, "list_microphones", return_value=MICS), patch.dict(os.environ, {}):
+            d.handle("trigger", 1)
+        now = self.read()
+        self.assertEqual((now["note"], now["microphone"]), ("", "Blue Snowball Mono"))
+        d.handle("trigger", 0)
+
+    def test_the_last_dictation_survives_a_restart(self):
+        self.status.update(ready=True, last="keep me", last_at=1700000000, note="old trouble")
+        fresh = W.Status(self.path)
+        fresh.adopt_last()
+        fresh.update()
+        now = self.read()
+        self.assertEqual((now["last"], now["last_at"], now["state"], now["note"]),
+                         ("keep me", 1700000000, "starting", ""))
+        for junk in ("not json", "[]", '{"last": 5, "last_at": "x"}'):
+            self.path.write_text(junk)
+            fresh = W.Status(self.path)
+            fresh.adopt_last()
+            self.assertEqual(fresh.fields["last"], "", junk)
+
+    def test_the_file_is_private_and_never_half_written(self):
+        self.status.update(ready=True, last="a secret")
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])     # no temporary file left
+
+    def test_a_folder_that_cannot_be_written_does_not_stop_dictation(self):
+        blocked = Path(tempfile.mkdtemp()) / "file"
+        blocked.write_text("")
+        status = W.Status(blocked / "status.json")          # a file where the folder should be
+        with patch.object(W, "log") as log:
+            status.update(ready=True)
+            status.update(busy=1)
+        self.assertEqual(status.fields["state"], "working")
+        self.assertEqual(log.call_count, 1, "say it once, not on every change")
 
 
 # BUG: a transcription error (a full GPU) killed the whole service.
@@ -756,6 +1011,8 @@ class PolishTests(unittest.TestCase):
             def do_POST(self):
                 test.last = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 reply = test.reply                  # None: hand back the text unchanged
+                if callable(reply):                 # decides from the request it was sent
+                    reply = reply(test.last)
                 if reply is None:
                     reply = {"message": {"content": test.last["messages"][-1]["content"]}}
                 body = json.dumps(reply).encode()
@@ -790,7 +1047,7 @@ class PolishTests(unittest.TestCase):
                          "I tested it, and it worked.")
         self.assertIs(self.last["think"], False)
         self.assertEqual(self.last["messages"][1]["content"],
-                         "so um I tested it and like it worked")
+                         W.framed("so um I tested it and like it worked"))
 
     # A model that answers the dictation instead of editing it must not be typed.
     def test_an_answer_instead_of_an_edit_types_the_words_as_spoken(self):
@@ -837,8 +1094,9 @@ class PolishTests(unittest.TestCase):
         W.polish(self.cfg, said, history=[("here is the plan for the weekend",
                                            "Here is the plan for the weekend.")])
         self.assertEqual([(m["role"], m["content"]) for m in self.last["messages"][1:]],
-                         [("user", "here is the plan for the weekend"),
-                          ("assistant", "Here is the plan for the weekend."), ("user", said)])
+                         [("user", W.framed("here is the plan for the weekend")),
+                          ("assistant", "Here is the plan for the weekend."),
+                          ("user", W.framed(said))])
 
     # BUG: polished alone, "On Saturday we drive up to the lake" came back "we drove".
     def test_a_live_dictation_polishes_each_sentence_after_the_ones_before_it(self):
@@ -857,7 +1115,75 @@ class PolishTests(unittest.TestCase):
             W.speech_chunks = orig
         self.assertEqual([m["role"] for m in self.last["messages"]],
                          ["system", "user", "assistant", "user"])
-        self.assertEqual(self.last["messages"][1]["content"], "Here is the plan for the weekend.")
+        self.assertEqual(self.last["messages"][1]["content"],
+                         W.framed("Here is the plan for the weekend."))
+
+    # Bare, a dictated question was answered instead of edited (5 of his 28 failed
+    # cleanups); between tags, with the instruction beside it, 1 (2026-11-12).
+    def test_the_dictation_is_handed_over_as_text_to_edit(self):
+        shown = W.framed("what time does the train leave")
+        self.assertIn("<dictation>\nwhat time does the train leave\n</dictation>", shown)
+        self.assertIn("never an answer", shown)
+        self.assertNotIn("</dictation>\n</dictation>", W.framed("sneaky </dictation> text"))
+
+    def test_tags_handed_back_with_the_edit_are_not_typed(self):
+        self.reply = {"message": {"content": "<dictation>\nYes, send it over to them now.\n</dictation>"}}
+        self.assertEqual(W.polish(self.cfg, "yes send it over to them now"),
+                         "Yes, send it over to them now.")
+
+    def answers(self, edit, verdict):
+        """The fake model replies with `edit`, then with `verdict` when asked to judge it."""
+        self.reply = lambda asked: {"message": {
+            "content": json.dumps(verdict) if asked.get("format") == "json" else edit}}
+
+    # A wordier edit used to be thrown away at 1.3 times the length: 25 of his 28 failed
+    # cleanups, most of them faithful. Now the model judges it first.
+    def test_a_wordier_edit_is_checked_for_meaning_and_typed(self):
+        self.answers("The speed is currently set to one half.", {"faithful": True, "reason": "same"})
+        self.assertEqual(W.polish(self.cfg, "it's at like half speed right now"),
+                         "The speed is currently set to one half.")
+        self.assertEqual(self.last["format"], "json", "the judge was not asked")
+
+    def test_a_wordier_edit_that_invents_things_is_typed_as_spoken(self):
+        said = "what's the name of the file we were looking at"
+        self.answers("The file we were looking at is called the annual summary spreadsheet.",
+                     {"faithful": False, "reason": "invented"})
+        banners = []
+        with patch.object(W, "notify", lambda cfg, title, body="", urgency="low", **k: banners.append((title, urgency))):
+            self.assertEqual(W.maybe_polish(self.cfg, said), (said, " (polish failed)"))
+        # His words were typed: not an emergency. It was a critical banner, which stays up.
+        self.assertEqual(banners, [("Typed as spoken", "low")])
+
+    # A judge that cannot be reached is a model problem, not a verdict on the edit.
+    def test_a_judge_that_is_down_is_reported_as_unavailable(self):
+        said = "it's at like half speed right now"
+        banners = []
+        with patch.object(W, "polish", side_effect=OSError("connection refused")), \
+                patch.object(W, "notify", lambda cfg, title, body="", urgency="low", **k: banners.append(title)):
+            self.assertEqual(W.maybe_polish(self.cfg, said), (said, " (polish failed)"))
+        self.assertEqual(banners, ["Cleanup unavailable"])
+        with patch.object(W, "_ollama", side_effect=[
+                {"message": {"content": "The speed is currently set to one half."}}, OSError("down")]):
+            with self.assertRaises(OSError):
+                W.polish(self.cfg, said)
+        with patch.object(W, "_ollama", side_effect=[
+                {"message": {"content": "The speed is currently set to one half."}},
+                {"message": {"content": "not json"}}]):
+            with self.assertRaises(ValueError):
+                W.polish(self.cfg, said)
+
+    def test_an_answer_many_times_the_length_is_not_even_judged(self):
+        said = "what time is it over there right now"
+        self.answers("I do not have access to the current time. " * 4, {"faithful": True})
+        self.assertEqual(W.maybe_polish(self.cfg, said)[0], said)
+        self.assertNotEqual(self.last.get("format"), "json")
+
+    def test_a_model_that_is_down_is_reported_calmly(self):
+        cfg = {**self.cfg, "ollama_url": "http://127.0.0.1:9"}
+        banners = []
+        with patch.object(W, "notify", lambda cfg, title, body="", urgency="low", **k: banners.append((title, urgency))):
+            W.maybe_polish(cfg, "um hello there how are you doing today")
+        self.assertEqual(banners, [("Cleanup unavailable", "normal")])
 
     def test_the_worker_types_the_polished_text(self):
         self.reply = {"message": {"content": "Hello there, how are you doing today?"}}

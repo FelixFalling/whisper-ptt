@@ -10,10 +10,15 @@ Open GNOME's top-right system menu:
 
 | Button | What it does |
 | --- | --- |
-| **Whisper** | Turns dictation and cleanup on together. Off stops dictation, disables cleanup, and requests unloading the cleanup model. |
+| **Whisper** | Turns dictation and cleanup on together. Off stops dictation, disables cleanup, and requests unloading the cleanup model. The line under its name says what dictation is doing: Ready, Listening, Transcribing, Starting, Off, or Needs attention. |
+| The arrow on **Whisper** | Opens a menu: choose the **Microphone**, **Copy** the last dictation again (for when it was typed into the wrong window), **Show Log**, **Open Settings File**. |
 | **Cleanup** | Enables rewriting or types as spoken while dictation remains running. Off requests unloading the cleanup model. Disabled while Whisper is off. |
 
-Stopping dictation also stops the optional Mac transcription server; the Mac can switch Whisper back on from its own menu (see [Mac menu bar app](#mac-menu-bar-app)). These controls do not change the service's login preference. GPU memory used by other applications is unaffected. The indicator reflects the service state, not whether the microphone and GPU have finished initializing.
+While Whisper is on, a microphone sits in the top bar. It turns into a red dot while you are being recorded, three dots while the text is being transcribed (also for the Mac), and a yellow warning when something needs attention, such as an unplugged microphone; the Whisper menu then says what. The buttons follow changes made anywhere else (the command line, the Mac) as they happen.
+
+Stopping dictation also stops the optional Mac transcription server; the Mac can switch Whisper back on from its own menu (see [Mac menu bar app](#mac-menu-bar-app)). These controls do not change the service's login preference. GPU memory used by other applications is unaffected.
+
+The trigger key only records while your own desktop session is on screen. At the login screen, or with another user's session in front, it is ignored, and the service (which the Mac may have switched on) only serves the network. `"require_desktop_session": false` removes that check.
 
 Text is inserted using a virtual keyboard, without touching the Linux clipboard. A US keyboard layout is assumed; unsupported characters are normalized. The trigger is read through Linux input devices, including on Wayland.
 
@@ -22,7 +27,7 @@ Text is inserted using a virtual keyboard, without touching the Linux clipboard.
 - Linux, Python 3.11+, systemd user services, PipeWire or another PortAudio-compatible microphone source.
 - NVIDIA GPU and compatible driver/CUDA libraries for the default transcription configuration. CPU transcription is configurable.
 - Ollama for optional cleanup. The example uses `qwen3.5:9b`; allow space for both Whisper and the cleanup model in GPU memory. Larger models may prevent transcription from loading.
-- GNOME Shell 50 for the included extension (other versions have not been validated).
+- GNOME Shell 50 or 51 for the included extension (other versions have not been validated).
 - System commands: `notify-send`, `nvidia-smi` for GPU status; Tailscale for optional network dictation.
 
 ## Install
@@ -55,7 +60,7 @@ systemctl --user enable --now whisper-ptt.service
 gnome-extensions enable whisper-polish@felixfalling
 ```
 
-Log out and back in after installing or changing the extension JavaScript. No third-party microphone permissions or GPU benchmarks have been validated by the automated control tests.
+Log out and back in after installing or changing the extension JavaScript. To try a change to the extension first, `tools/shell-rig.sh start` runs it in a throwaway headless GNOME Shell with its own settings; `tools/shell-rig.sh eval`, `shot` and `errors` read its buttons, take screenshots and show what it logged (the script's header has examples). No third-party microphone permissions or GPU benchmarks have been validated by the automated control tests.
 
 ## Configure
 
@@ -65,7 +70,8 @@ Run `make config` to edit `~/.config/whisper-ptt/config.json`, then run `make de
 - `polish_model`: local Ollama model for cleanup.
 - `polish_prompt`: editing style. The example removes filler and repetition and preserves substantive details, questions, uncertainty, and the speaker's tone.
 - `transcribe_while_talking: false`: waits for the complete recording before editing, giving cleanup the full context. Turn it on for sentence-by-sentence processing with lower latency.
-- `polish_min_word_similarity`: low word overlap triggers an extra local meaning check. This model-based check can still miss meaning changes. Failed cleanup falls back to the transcript.
+- `polish_min_word_similarity`: low word overlap triggers an extra local meaning check, and so does an edit more than 1.3 times as long as what was said. This model-based check can still miss meaning changes. Failed cleanup falls back to the transcript.
+- `notify_progress: false`: no "Listening", "Transcribing" or "Dictation ready" banners; the top-bar indicator shows those. Problems still raise a banner.
 - `polish_timeout`: maximum wait per cleanup request; large rewrites can require two requests.
 - `idle_unload_seconds`: parks Whisper in system RAM after inactivity, releasing its GPU allocation.
 - `short_entry_min_words`: omit the terminal period below this word count (default `4`, `0` disables). Questions, exclamations, and ellipses are preserved.

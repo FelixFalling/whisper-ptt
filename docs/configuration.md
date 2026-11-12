@@ -52,7 +52,8 @@ JSON requires double quotes and does not allow comments or trailing commas. Edit
 - `polish_prompt` controls the editor's instructions and tone. Preserve the instructions about not answering questions, inventing details, or changing meaning when customizing it.
 - `polish_min_words` skips cleanup below this word count, separately from period removal.
 - `polish_timeout` is the timeout in seconds for each request. Large rewrites can require a second request to check meaning.
-- `polish_min_word_similarity` triggers that check below the configured similarity (current example: `0.25`). `polish_min_length_ratio` rejects output much shorter than the input (current example: `0.2`). These checks are imperfect and are not guarantees of meaning preservation.
+- `polish_min_word_similarity` triggers that check below the configured similarity (current example: `0.25`). `polish_min_length_ratio` rejects output much shorter than the input (current example: `0.2`). An edit more than 1.3 times as long as the dictation is also checked for meaning, and one longer than `polish_max_length_ratio` times (default `3.0`) is taken for an answer and discarded unchecked. These checks are imperfect and are not guarantees of meaning preservation.
+- The dictation is handed to the model between `<dictation>` tags with a one-line instruction to edit it and never answer it. That wrapper is added by the program, not by `polish_prompt`.
 - `transcribe_while_talking: false` gives cleanup the complete recording. `true` processes sentence chunks during speech for lower latency.
 
 ## Microphone selection and stalled capture
@@ -103,7 +104,9 @@ The UI will create an override again the next time you use its switches. Whisper
 ## Other settings
 
 - `min_duration`: ignore trigger presses shorter than this many seconds.
-- `notify`, `notify_timeout_ms`: notification behavior.
+- `notify`, `notify_timeout_ms`: notification behavior. `notify_progress: false` keeps the banners that only report progress away and leaves those to the top-bar indicator; problems still raise one.
+- `require_desktop_session` (default `true`): the trigger key records only while your own desktop session is the one on screen, not at the login screen or behind another user's session.
+- A setting of the wrong kind (a number in quotes, a negative delay) or with an unknown name is reported in the journal at startup and the default is used. `whisper-ptt logs` right after a restart shows it.
 - `server`, `server_host`, `server_port`, `server_token`: optional network dictation. Keep the token private; use Tailscale and leave the server disabled if you do not need it. With `server_host` at `"tailscale"`, only peers with a tailnet address of their own are answered; a host set by hand is not filtered.
 - `server_control` (default `true`), `control_port` (default: `server_port` + 1): the remote switch, `whisper-ptt-control.service`, which lets the Mac turn Whisper on and off at the desktop. It runs only while `server` is on and uses the same address and token. `make deploy` enables and restarts it; it reads the token on every request, so a changed token needs no restart of this service.
 - The Mac client's separate device settings remain in `~/.config/whisper-ptt/mac.json` on the Mac.

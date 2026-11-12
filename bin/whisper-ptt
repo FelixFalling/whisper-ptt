@@ -63,7 +63,9 @@ import json, pathlib
 c = json.loads((pathlib.Path.home() / '.config/whisper-ptt/config.json').read_text())
 print(c.get('ollama_url', 'http://127.0.0.1:11434').rstrip('/') + '/api/generate')
 print(json.dumps({'model': c.get('polish_model', 'qwen3:14b'), 'keep_alive': c.get('polish_keep_alive', '10m')}))")
-                 curl -s -o /dev/null --max-time 60 "${WARM%%$'\n'*}" -d "${WARM#*$'\n'}" &
+                 # Detached from our output: left on the caller's pipe, this curl kept the
+                 # GNOME button (and the Mac's switch) waiting until the model had loaded.
+                 curl -s -o /dev/null --max-time 60 "${WARM%%$'\n'*}" -d "${WARM#*$'\n'}" >/dev/null 2>&1 &
                fi
                # --quiet: the top-bar switch shows the state itself, so no banner
                [ "${2:-status}" != status ] && [ "${3:-}" != --quiet ] && notify-send -a whisper-ptt -e -t 2000 \

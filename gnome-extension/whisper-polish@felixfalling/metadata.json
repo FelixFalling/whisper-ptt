@@ -1,7 +1,7 @@
 {
   "uuid": "whisper-polish@felixfalling",
   "name": "Whisper Controls",
-  "description": "Whisper power and optional cleanup controls, with model unloading when turned off.",
+  "description": "Whisper dictation in the system menu: on and off, cleanup, microphone, the last dictation, and a top-bar indicator that follows each dictation.",
   "shell-version": [
     "50",
     "51"

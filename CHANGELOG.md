@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- GNOME: the Whisper button has a menu (microphone, copy the last dictation, log,
+  settings file) and says what dictation is doing; the top-bar microphone turns into a
+  red dot while recording, three dots while transcribing and a warning when something
+  needs attention. The extension no longer polls: it ran a Python process every three
+  seconds, and now follows systemd and two small files as they change.
+- Cleanup: hand the dictation to the model as text to edit, and check a wordier edit for
+  meaning instead of discarding it. On three weeks of real dictations, 27 of the 28
+  rejected cleanups now go through; the other is rightly refused. A cleanup that is not
+  used is a quiet banner, no longer a critical one that stays on screen.
+- A Right Ctrl shortcut no longer wakes the models: Whisper and the polish model are
+  loaded once a press has lasted a quarter of a second.
+- The trigger key is ignored while your desktop session is not on screen (the login
+  screen, another user), so a service the Mac switched on cannot record there.
+- Settings of the wrong kind or with unknown names are reported and replaced by the
+  default instead of failing later; `notify_progress`, `require_desktop_session` and
+  `polish_max_length_ratio` are new.
+- The idle service no longer wakes ten times a second, the two servers sleep until a
+  request comes, switching Cleanup on no longer keeps the button busy while the model
+  loads, and stopping the service is given 15 seconds at most.
 - Switch Whisper on and off at the desktop from the Mac's menu. A new always-on service,
   `whisper-ptt-control.service`, answers the Mac when the dictation service is stopped.
   Mac app 1.1 shows the desktop's switch, tells "Whisper is off there" from "desktop not

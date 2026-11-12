@@ -50,7 +50,12 @@ def load_config():
 
 
 def control_port(cfg):
-    return int(cfg.get("control_port") or int(cfg.get("server_port", 8765)) + 1)
+    """control_port when it is a port, otherwise one above the transcription server's."""
+    wanted = cfg.get("control_port")
+    if type(wanted) is int and 0 < wanted < 65536:
+        return wanted
+    server = cfg.get("server_port", 8765)
+    return (server if type(server) is int and 0 < server < 65535 else 8765) + 1
 
 
 def tailscale_ip():
@@ -199,7 +204,7 @@ def main():
         log(f"cannot listen on {host}:{port}: {exc}")
         return 1                         # systemd tries again (the address may not be up yet)
     log(f"remote switch on http://{host}:{port}")
-    srv.serve_forever()
+    srv.serve_forever(poll_interval=None)    # sleeps until a request comes; nothing shuts it down
 
 
 if __name__ == "__main__":

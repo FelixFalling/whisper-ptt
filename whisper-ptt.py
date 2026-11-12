@@ -14,6 +14,7 @@ still being spoken (LiveSession), and notifications are shown from their own thr
 """
 import collections
 import concurrent.futures
+import contextlib
 import ctypes
 import difflib
 import fcntl
@@ -111,6 +112,10 @@ DEFAULTS = {
     # records from the system default instead (and says so).
     "microphone_fallback": False,
     "notify": True,
+    # False keeps the banners that only report progress away ("Listening", "Transcribing",
+    # "Dictation ready", "nothing heard"); the top-bar indicator shows those. Problems
+    # still raise a banner.
+    "notify_progress": True,
     "notify_timeout_ms": 1500,
     "trailing_space": True,
     # Omit the final period below this word count; 0 disables the rule.
@@ -124,6 +129,10 @@ DEFAULTS = {
     # releases the GPU; the next press puts them back in ~0.13 s instead of reloading from
     # disk in 2-6 s (measured 2026-10-01). False drops the model entirely, as before.
     "idle_park_in_ram": True,
+    # The trigger key only records while this user's desktop session is the one on screen.
+    # The Mac can start this service with nobody logged in; without this, Right Ctrl at the
+    # login screen would record whoever is there and type it into the password field.
+    "require_desktop_session": True,
     # Network dictation for the MacBook. The server binds ONLY to this machine's Tailscale
     # address ("tailscale" = look it up), so nothing is reachable from the LAN or the
     # internet, and every request must carry server_token. Empty token = server off.
@@ -132,8 +141,10 @@ DEFAULTS = {
     "server_port": 8765,
     "server_token": "",
     # The remote switch (bin/whisper-control.py, whisper-ptt-control.service): lets the Mac
-    # turn this service on and off, one port above server_port. Read by that script.
+    # turn this service on and off, one port above server_port (or on control_port). Read
+    # by that script.
     "server_control": True,
+    "control_port": None,
     # Polish: a local model fixes grammar, splits run-ons and removes filler words before
     # the text is typed. Enabled by default; `whisper-ptt polish off` turns it off without a restart. qwen3:14b takes
     # ~0.9 s once loaded (4.4 s cold) and holds ~9 GB of VRAM until polish_keep_alive
@@ -148,20 +159,76 @@ DEFAULTS = {
     # dictations every polish failure was on 2-5 words (one came back as a 516-character
     # answer instead of an edit).
     "polish_min_words": 6,
+    # The system prompt for the polish model; empty uses POLISH_PROMPT below.
+    "polish_prompt": "",
+    # An edit shorter than this share of the dictation, or with fewer of its words in
+    # order than polish_min_word_similarity, is not trusted as it stands.
+    "polish_min_length_ratio": 0.35,
+    "polish_min_word_similarity": 0.5,
+    # An edit more than 1.3 times as long is checked for meaning before it is typed; one
+    # longer than this many times is an answer, not an edit, and is thrown away unchecked.
+    "polish_max_length_ratio": 3.0,
 }
 
 
+# null is a way of saying "none": language null lets Whisper detect it.
+NULLABLE = frozenset({"language", "initial_prompt", "microphone", "polish_prompt", "control_port"})
+# Counts and ports, which have no fractions; the other numbers are durations and ratios.
+WHOLE = frozenset({"beam_size", "server_port", "notify_timeout_ms", "short_entry_min_words",
+                   "polish_min_words"})
+
+
+def _setting(name, value):
+    """(usable, value) for a value from config.json, judged by the default it replaces."""
+    default = DEFAULTS[name]
+    number = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if value is None:
+        return name in NULLABLE, value
+    if name == "polish_keep_alive":      # Ollama takes "10m", seconds, or -1 for good
+        return isinstance(value, str) or number, value
+    if name == "control_port":
+        return type(value) is int and 0 < value < 65536, value
+    if isinstance(default, bool):
+        return isinstance(value, bool), value
+    if isinstance(default, (int, float)):
+        if not number or value < 0:
+            return False, value
+        if name in WHOLE:
+            return float(value).is_integer(), int(value)
+        return True, value
+    return isinstance(value, type(default)), value
+
+
 def load_config():
+    """The settings: DEFAULTS, overridden by what config.json holds that makes sense.
+
+    A setting of the wrong kind used to be taken as it was and blew up wherever it was
+    first used ("type_delay_ms": "2" failed on every dictation, a list for the whole file
+    was a traceback). Now it is named in the journal and the default is used, and so is a
+    name this program does not know, which is usually a typo.
+    """
     cfg = dict(DEFAULTS)
+    saved = {}
     if CONFIG_PATH.exists():
         try:
-            cfg.update(json.loads(CONFIG_PATH.read_text()))
+            saved = json.loads(CONFIG_PATH.read_text())
+            if not isinstance(saved, dict):
+                raise ValueError("it must be a JSON object")
         except Exception as exc:
             log(f"config unreadable, using defaults: {exc}")
-    threshold = cfg["short_entry_min_words"]
-    if type(threshold) is not int or threshold < 0:
-        log("short_entry_min_words must be a nonnegative integer; using 4")
-        cfg["short_entry_min_words"] = 4
+            saved = {}
+    for name, value in saved.items():
+        if name not in DEFAULTS:
+            log(f"config: unknown setting {name!r} ignored (a typo?)")
+            continue
+        usable, value = _setting(name, value)
+        if usable:
+            cfg[name] = value
+        else:
+            log(f"config: {name} cannot be {saved[name]!r}; using {DEFAULTS[name]!r}")
+    if cfg["beam_size"] < 1:
+        log("config: beam_size must be at least 1; using 1")
+        cfg["beam_size"] = 1
     return cfg
 
 
@@ -215,6 +282,78 @@ def keep_running(fn, *args):
     threading.Thread(target=run, daemon=True, name=fn.__name__).start()
 
 
+# ------------------------------------------------------------------ status for the top bar
+RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR")
+                   or Path.home() / ".local" / "state") / "whisper-ptt"
+
+
+class Status:
+    """What the service is doing, for the GNOME indicator: status.json in RUNTIME_DIR.
+
+    The extension watches the file, so the top bar follows a dictation as it happens
+    without anyone polling. Written only when something changes, to a temporary file that
+    then replaces the old one, so a reader never sees half of it. The folder and the file
+    are this user's alone: "last" is the last dictation, kept so the menu can copy it
+    again when it was typed into the wrong window.
+
+    state is "starting", "idle", "recording" or "working"; note is a problem worth showing
+    ("Microphone not connected") until a dictation goes through again.
+    """
+
+    def __init__(self, path=None):
+        self.path = path                # None: track the state, write nothing (tests, `mic`)
+        self._lock = threading.Lock()
+        self._ready = False
+        self._recording = False
+        self._busy = 0
+        self._written = False           # this run has replaced the previous run's file
+        self._warned = False
+        self.fields = {"state": "starting", "note": "", "microphone": "", "last": "",
+                       "last_at": 0}
+
+    def adopt_last(self):
+        """Carries the last dictation over from the previous run, so restarting the
+        service (a new microphone, a changed setting) does not forget it."""
+        try:
+            old = json.loads(self.path.read_text())
+            last, at = old["last"], old["last_at"]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return
+        if isinstance(last, str) and isinstance(at, int):
+            self.fields.update(last=last, last_at=at)
+
+    def update(self, ready=None, recording=None, busy=0, **fields):
+        with self._lock:
+            if ready is not None:
+                self._ready = ready
+            if recording is not None:
+                self._recording = recording
+            self._busy = max(0, self._busy + busy)
+            state = ("starting" if not self._ready else "recording" if self._recording
+                     else "working" if self._busy else "idle")
+            new = {**self.fields, **fields, "state": state}
+            changed, self.fields = new != self.fields, new
+            if self.path is not None and (changed or not self._written):
+                self._write()
+
+    def _write(self):
+        try:
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump({**self.fields, "pid": os.getpid()}, f, ensure_ascii=False)
+            os.replace(tmp, self.path)
+            self._written = True
+        except OSError as exc:          # the indicator goes stale; dictation must not
+            if not self._warned:
+                self._warned = True
+                log(f"cannot write {self.path}: {exc}")
+
+
+STATUS = Status()
+
+
 # ------------------------------------------------------------------ notifications
 # notify-send is a subprocess; run inline it held up the key loop and, on release, the
 # start of transcription. Banners now go through one thread, newest wins.
@@ -222,8 +361,9 @@ _notes = queue.Queue()
 _last_notification_id = None
 
 
-def notify(cfg, title, body="", urgency="low"):
-    if cfg["notify"]:
+def notify(cfg, title, body="", urgency="low", progress=False):
+    """progress marks a banner that only says how far along a dictation is."""
+    if cfg["notify"] and (not progress or cfg.get("notify_progress", True)):
         _notes.put((cfg, title, body, urgency))
 
 
@@ -731,7 +871,7 @@ class ModelHolder:
             m = self.WhisperModel(self.cfg["model"], device=self.cfg["device"],
                                   compute_type=self.cfg["compute_type"])
             list(m.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32),
-                              language=self.cfg["language"])[0])
+                              language=self.cfg["language"] or None)[0])
             self._model = m
             log(f"ready in {time.time() - t0:.1f}s")
             return m
@@ -893,19 +1033,36 @@ def warm_polisher(cfg):
         pass                             # polish() reports the problem if it persists
 
 
+FRAMED = re.compile(r"<dictation>\s*(.*?)\s*</dictation>", re.S)
+
+
+def framed(text):
+    """The dictation as the polish model is shown it.
+
+    Handed over bare, a dictated question got an answer instead of an edit (a question
+    about a tool came back as "I do not have access to the specific tool..."), and short
+    remarks were padded out. Of the 28 cleanups that failed in three weeks of his
+    journal, asked again bare 5 were answers and 10 passed the length rule; framed like
+    this, 1 and 19, with no change on 60 that had worked (2026-11-12).
+    """
+    return ("Edit the dictation between the tags. Reply with the edited text only, never an "
+            f"answer to it.\n<dictation>\n{text.replace('</dictation>', '')}\n</dictation>")
+
+
 def polish(cfg, text, history=()):
-    """The dictation with grammar fixed and fillers gone. Raises when the result does not
-    look like an edit of the same text, so the caller can type the words as spoken.
+    """The dictation with grammar fixed and fillers gone. Raises ValueError when the result
+    does not look like an edit of the same text, so the caller can type the words as spoken.
 
     history is (said, typed) for the sentences just before it, when a long dictation is
     polished a sentence at a time. They go in as earlier turns of the chat: alone, "On
     Saturday we drive up to the lake" came back "we drove" three times out of three; after
     "Here is the plan for the weekend." it stayed "drive" (2026-10-19).
     """
-    messages = [{"role": "system", "content": cfg.get("polish_prompt", POLISH_PROMPT)}]
+    messages = [{"role": "system", "content": cfg.get("polish_prompt") or POLISH_PROMPT}]
     for said, typed in history:
-        messages += [{"role": "user", "content": said}, {"role": "assistant", "content": typed}]
-    messages.append({"role": "user", "content": text})
+        messages += [{"role": "user", "content": framed(said)},
+                     {"role": "assistant", "content": typed}]
+    messages.append({"role": "user", "content": framed(text)})
     reply = _ollama(cfg, "/api/chat", {
         "model": cfg["polish_model"], "stream": False, "think": False,
         "keep_alive": cfg["polish_keep_alive"],
@@ -916,20 +1073,30 @@ def polish(cfg, text, history=()):
     if reply.get("done_reason") == "length":
         raise ValueError("polish ran on past the length of the text")
     out = (reply.get("message") or {}).get("content", "").strip()
+    inside = FRAMED.search(out)
+    if inside:                            # the model handed the tags back with its edit
+        out = inside.group(1)
+    out = out.replace("<dictation>", "").replace("</dictation>", "").strip()
     if len(out) >= 2 and out[0] == out[-1] and out[0] in "\"'":
         out = out[1:-1].strip()           # the model sometimes quotes its answer
     out = out.replace(" — ", ", ").replace("—", ", ").replace("–", "-")
     if not out:
         raise ValueError("polish returned nothing")
-    if abs(len(out) - len(text)) > 10 and not cfg.get("polish_min_length_ratio", 0.35) <= len(out) / len(text) <= 1.3:
+    # A few characters either way is always an edit ("yes send it" -> "Yes, send it.").
+    ratio = len(out) / len(text) if abs(len(out) - len(text)) > 10 else 1.0
+    if not cfg.get("polish_min_length_ratio", 0.35) <= ratio <= cfg.get("polish_max_length_ratio", 3.0):
         raise ValueError(f"polish changed the length too much ({len(text)} -> {len(out)} chars)")
     # An edit keeps most of the words in order; an answer or a rewrite does not. Real
     # edits of his dictations kept 69% at the lowest (median 98%).
     said, typed = _words(text), _words(out)
     kept = difflib.SequenceMatcher(None, said, typed).ratio()
-    if kept < cfg.get("polish_min_word_similarity", 0.5):
-        # Word overlap detects large rewrites, not whether their meaning is correct.
-        # Only large rewrites need this extra local inference.
+    # Neither test says whether the meaning survived, so an edit that fails one is put to
+    # the model once more, as a judge. A longer edit used to be thrown away at 1.3 times
+    # the length: that was 25 of those 28 failures, most of them faithful (a casual
+    # remark written out in full sentences). The judge passed those and
+    # refused the answers and the made-up details among them. Only these edits pay for
+    # the second inference.
+    if ratio > 1.3 or kept < cfg.get("polish_min_word_similarity", 0.5):
         try:
             check = _ollama(cfg, "/api/chat", {
                 "model": cfg["polish_model"], "stream": False, "think": False,
@@ -949,9 +1116,10 @@ def polish(cfg, text, history=()):
             if check.get("done_reason") == "length":
                 raise ValueError("meaning check was truncated")
             verdict = json.loads((check.get("message") or {}).get("content", ""))
-            if verdict.get("faithful") is not True:
-                raise ValueError("meaning check rejected edit: " + str(verdict.get("reason", "unknown")))
-        except Exception as exc:
+            if not isinstance(verdict, dict) or verdict.get("faithful") is not True:
+                reason = verdict.get("reason", "unknown") if isinstance(verdict, dict) else "no verdict"
+                raise ValueError("meaning check rejected edit: " + str(reason))
+        except ValueError as exc:        # refused, cut short, or not the JSON asked for
             log("rejected cleanup draft: " + repr(out))
             raise ValueError(f"large rewrite could not be verified: {exc}") from exc
     return out
@@ -973,8 +1141,12 @@ def maybe_polish(cfg, text, quiet=False, polishing=None, history=()):
         return polish(cfg, text, history), f" polished in {time.time() - t0:.2f}s"
     except Exception as exc:
         log(f"polish failed, typing it as spoken: {exc}")
-        if not quiet:
-            notify(cfg, "Polish failed", "Typed it as spoken.", "critical")
+        # His words are typed either way, so this is not an emergency. It was a critical
+        # banner, which GNOME keeps on screen until it is dismissed, on one dictation in six.
+        if not quiet and isinstance(exc, ValueError):
+            notify(cfg, "Typed as spoken", "The cleanup changed too much to trust.")
+        elif not quiet:
+            notify(cfg, "Cleanup unavailable", "Typed it as spoken.", "normal")
         return text, " (polish failed)"
 
 
@@ -1228,22 +1400,26 @@ def make_server(holder, cfg, host, tailnet_only=False):
                 return self._reply(400, {"error": str(exc)})
             if audio.size == 0:
                 return self._reply(200, {"text": ""})
-            t0 = time.time()
+            STATUS.update(busy=1)        # the top bar shows the GPU working for the Mac
             try:
-                text = transcribe_audio(holder, cfg, audio)
-            except Exception as exc:
-                log(f"remote transcription failed: {exc}")
-                after_failure(holder, exc)
-                return self._reply(503, {"error": explain(exc)})
-            after_success()
-            took = time.time() - t0
-            raw = text
-            # quiet: a failed cleanup of the Mac's words is no banner on this desktop.
-            text, note = maybe_polish(cfg, text, quiet=True, polishing=self._cleanup())
-            text = _short_entry(text, cfg["short_entry_min_words"])
-            log_dictation(raw, text,
-                          f"audio {audio.size / SAMPLE_RATE:.1f}s · transcription {took:.2f}s{note}",
-                          notes=[note], source="Remote")
+                t0 = time.time()
+                try:
+                    text = transcribe_audio(holder, cfg, audio)
+                except Exception as exc:
+                    log(f"remote transcription failed: {exc}")
+                    after_failure(holder, exc)
+                    return self._reply(503, {"error": explain(exc)})
+                after_success()
+                took = time.time() - t0
+                raw = text
+                # quiet: a failed cleanup of the Mac's words is no banner on this desktop.
+                text, note = maybe_polish(cfg, text, quiet=True, polishing=self._cleanup())
+                text = _short_entry(text, cfg["short_entry_min_words"])
+                log_dictation(raw, text,
+                              f"audio {audio.size / SAMPLE_RATE:.1f}s · transcription {took:.2f}s{note}",
+                              notes=[note], source="Remote")
+            finally:
+                STATUS.update(busy=-1)
             self._reply(200, {"text": text})
 
     return ThreadingHTTPServer((host, int(cfg["server_port"])), Handler)
@@ -1277,7 +1453,7 @@ def serve(holder, cfg):
         log(f"network dictation off: cannot listen on {host}:{cfg['server_port']}: {exc}")
         return
     log(f"network dictation on http://{host}:{cfg['server_port']}")
-    srv.serve_forever()
+    srv.serve_forever(poll_interval=None)    # nothing ever shuts it down: no need to wake twice a second to check
 
 
 def idle_watchdog(holder, seconds):
@@ -1291,8 +1467,47 @@ def idle_watchdog(holder, seconds):
                 log(f"idle {seconds}s - model unloaded, VRAM released")
 
 
+# ------------------------------------------------------------------ the desktop session
+def _sd_login():
+    try:
+        return ctypes.CDLL("libsystemd.so.0"), ctypes.CDLL(None)
+    except OSError:
+        return None, None
+
+
+_SD, _LIBC = _sd_login()
+
+
+def desktop_session_active(uid=None):
+    """Whether this user's own desktop session is the one on screen.
+
+    False at the login screen, after logging out, and while another user's session or
+    another virtual terminal is in front. It asks logind (sd-login reads two small files
+    under /run/systemd, no D-Bus), so it is cheap enough for every press. A session over
+    SSH has no seat and does not count. True when logind cannot be asked at all.
+    """
+    if _SD is None:
+        return True
+    session = ctypes.c_void_p()
+    if _SD.sd_uid_get_display(os.getuid() if uid is None else uid, ctypes.byref(session)) < 0:
+        return False                     # no session of his is open
+    try:
+        seat = ctypes.c_void_p()
+        if _SD.sd_session_get_seat(session, ctypes.byref(seat)) < 0:
+            return False                 # SSH: logged in, but not at this machine
+        _LIBC.free(seat)
+        return _SD.sd_session_is_active(session) > 0
+    finally:
+        _LIBC.free(session)
+
+
 # ------------------------------------------------------------------ dictation
 Job = collections.namedtuple("Job", "audio held session released")
+# How long a press must last before the models are woken for it. Right Ctrl is a modifier
+# too: 150 of 224 presses in three weeks of his journal were shortcuts, each of which moved
+# Whisper back onto the GPU and loaded the 9 GB polish model for another ten minutes. 94%
+# of them were over within a quarter of a second; a dictation is still being spoken then.
+WARM_AFTER = 0.25
 
 
 class Dictation:
@@ -1310,6 +1525,9 @@ class Dictation:
         self.session = None
         self._press_id = 0
         self._mic = None                 # the microphone last recorded from, for the log
+        self._warmed = 0                 # the press the models were last woken for
+        self._polishing = False
+        self._away = False               # the last press came with no desktop session
 
     def handle(self, kind, value):
         if kind == "trigger" and value == 1:
@@ -1327,9 +1545,18 @@ class Dictation:
     def _press(self):
         if self.recording:
             return
+        if self.cfg.get("require_desktop_session", True) and not desktop_session_active():
+            if not self._away:
+                self._away = True
+                log("the trigger key is ignored: his desktop session is not the one on screen")
+            return
+        if self._away:
+            self._away = False
+            log("his desktop session is back on screen; the trigger key works again")
         node, description, missing = pick_microphone(self.cfg)
         if missing and not self.cfg.get("microphone_fallback"):
             log(f"microphone {missing} is not connected; not recording")
+            STATUS.update(note=f"{missing} is not connected")
             notify(self.cfg, "Microphone not connected",
                    f"{missing} isn't plugged in. Plug it in and press again.", "critical")
             return
@@ -1344,28 +1571,49 @@ class Dictation:
         use_microphone(node)
         self.recording, self.cancelled, self.started_at = True, False, time.time()
         self._press_id += 1
-        self.holder.preload_async()      # overlap any reload with the user speaking
-        polishing = polish_on(self.cfg)
-        if polishing:
-            threading.Thread(target=warm_polisher, args=(self.cfg,), daemon=True).start()
+        self._polishing = polish_on(self.cfg)
         try:
             self.recorder.start()
             log("microphone opened for dictation")
         except Exception as exc:
             log(f"could not open microphone: {exc}")
+            STATUS.update(note="The microphone could not be opened")
             notify(self.cfg, "Dictation error", str(exc), "critical")
             self.recording = False
             return
+        STATUS.update(microphone=description,
+                      note=f"{missing} is not connected, using the default" if missing else "")
         if self.cfg["transcribe_while_talking"]:
-            self.session = LiveSession(self.cfg, self.holder, self.recorder.blocks, polishing)
-        # The banner waits out min_duration, so a quick Ctrl+C shows nothing at all.
+            self.session = LiveSession(self.cfg, self.holder, self.recorder.blocks,
+                                       self._polishing)
+        # Both wait a moment, so a quick Ctrl+C wakes no model and shows nothing at all.
         press = self._press_id
-        threading.Timer(self.cfg["min_duration"], self._listening_banner,
-                        args=(press,)).start()
+        for delay, then in ((min(WARM_AFTER, self.cfg["min_duration"]), self._warm_if_held),
+                            (self.cfg["min_duration"], self._listening)):
+            timer = threading.Timer(delay, then, args=(press,))
+            timer.daemon = True
+            timer.start()
 
-    def _listening_banner(self, press):
-        if self.recording and not self.cancelled and press == self._press_id:
-            notify(self.cfg, "🎙 Listening…")
+    def _still(self, press):
+        return self.recording and not self.cancelled and press == self._press_id
+
+    def _warm_if_held(self, press):
+        if self._still(press):           # not a tap, not a shortcut, not an older press
+            self._warm(press)
+
+    def _warm(self, press):
+        """Wakes the models for this press, once: the reload overlaps with him speaking."""
+        if press == self._warmed:
+            return
+        self._warmed = press
+        self.holder.preload_async()
+        if self._polishing:
+            threading.Thread(target=warm_polisher, args=(self.cfg,), daemon=True).start()
+
+    def _listening(self, press):
+        if self._still(press):
+            STATUS.update(recording=True)
+            notify(self.cfg, "🎙 Listening…", progress=True)
 
     def check_recording(self, devices):
         if not self.recording:
@@ -1375,6 +1623,7 @@ class Dictation:
             log("microphone delivered no audio; cancelling recording")
             self.cancelled = True
             self._release()
+            STATUS.update(note="The microphone delivered no audio")
             notify(self.cfg, "Microphone unavailable",
                    "No audio arrived. Check the input device in Sound settings.", "critical")
         elif held > 0.2 and not devices.trigger_down():
@@ -1393,8 +1642,11 @@ class Dictation:
         if self.cancelled or held < self.cfg["min_duration"] or audio.size == 0:
             if session:
                 session.discard()
+            STATUS.update(recording=False)
             return                       # a modifier press or a tap: not dictation
-        notify(self.cfg, "✍ Transcribing…")
+        self._warm(self._press_id)       # released before the timer got to it
+        STATUS.update(recording=False, busy=1)
+        notify(self.cfg, "✍ Transcribing…", progress=True)
         self.jobs.put(Job(audio, held, session, released))
 
 
@@ -1449,22 +1701,25 @@ def dictate(cfg, holder, typer, job):
             if ready is None:
                 ready = time.monotonic() - job.released
             if not typer.type((" " if typed else "") + text):
+                STATUS.update(note="Could not type the text: is /dev/uinput writable?")
                 notify(cfg, "Could not type the text", "Is /dev/uinput writable?", "critical")
                 return
             typed.append(text)
     except Exception as exc:
         log(f"transcription failed: {exc}")
+        STATUS.update(note=explain(exc))
         notify(cfg, "Dictation failed", explain(exc), "critical")
         after_failure(holder, exc)
         return
     after_success()
     if not typed:
         log(f"nothing recognised ({job.held:.1f}s audio)")
-        notify(cfg, "…nothing heard")
+        notify(cfg, "…nothing heard", progress=True)
         return
     if cfg["trailing_space"]:
         typer.type(" ")
     text = " ".join(typed) + (" " if cfg["trailing_space"] else "")
+    STATUS.update(last=text.strip(), last_at=int(time.time()), note="")
     done = time.monotonic() - job.released
     if job.session:
         raw = " ".join(said for said, _ in job.session.history if said)
@@ -1484,11 +1739,18 @@ def worker(cfg, holder, jobs, typer):
     """Transcribes and types each recording, in order. A failure is reported and the
     service keeps running; it used to kill the whole service (a full GPU did it)."""
     while True:
-        dictate(cfg, holder, typer, jobs.get())
+        job = jobs.get()
+        try:
+            dictate(cfg, holder, typer, job)
+        finally:
+            STATUS.update(busy=-1)
 
 
 def main():
     cfg = load_config()
+    STATUS.path = RUNTIME_DIR / "status.json"
+    STATUS.adopt_last()
+    STATUS.update(microphone=wanted_microphone(cfg) or "System default")
     log(f"microphone source: {wanted_microphone(cfg) or 'system default'}")
     keycode = getattr(ecodes, cfg["key"], None)
     if keycode is None:
@@ -1536,17 +1798,27 @@ def main():
         log(f"GPU released after {idle_s}s idle")
     else:
         holder._load_quietly()
-    _, _, missing = pick_microphone(cfg)
-    if missing and not cfg.get("microphone_fallback"):
-        log(f"microphone {missing} is not connected; dictation waits until it is plugged in")
-        notify(cfg, "Microphone not connected",
-               f"{missing} isn't plugged in. Dictation will work once it is.", "critical")
-    elif missing:
-        log(f"microphone {missing} is not connected; using the system default until it is")
-        notify(cfg, "Dictation ready", f"{missing} isn't plugged in, so the default "
-               "microphone will be used.")
+    if cfg.get("require_desktop_session", True) and not desktop_session_active():
+        # Nobody is logged in at the desktop (the Mac switched this on). PipeWire shows no
+        # microphones then, so looking for his would only report it missing.
+        log("no desktop session of his is on screen: the trigger key waits for one, "
+            "network dictation works")
     else:
-        notify(cfg, "Dictation ready", f"Hold {cfg['key'].replace('KEY_', '')} to talk")
+        _, description, missing = pick_microphone(cfg)
+        if description:
+            STATUS.update(microphone=description)
+        if missing and not cfg.get("microphone_fallback"):
+            log(f"microphone {missing} is not connected; dictation waits until it is plugged in")
+            STATUS.update(note=f"{missing} is not connected")
+            notify(cfg, "Microphone not connected",
+                   f"{missing} isn't plugged in. Dictation will work once it is.", "critical")
+        elif missing:
+            log(f"microphone {missing} is not connected; using the system default until it is")
+            notify(cfg, "Dictation ready", f"{missing} isn't plugged in, so the default "
+                   "microphone will be used.")
+        else:
+            notify(cfg, "Dictation ready", f"Hold {cfg['key'].replace('KEY_', '')} to talk",
+                   progress=True)
 
     if cfg["server"]:
         if cfg["server_token"]:
@@ -1557,10 +1829,13 @@ def main():
     jobs = queue.Queue()
     keep_running(worker, cfg, holder, jobs, typer)
     dictation = Dictation(cfg, holder, Recorder(), jobs)
+    STATUS.update(ready=True)
     while True:
         try:
             try:
-                event = events.get(timeout=0.1)
+                # Only a recording needs looking after (check_recording). Idle, this
+                # thread used to wake ten times a second, all day, to find nothing.
+                event = events.get(timeout=0.1 if dictation.recording else None)
             except queue.Empty:
                 event = None
             if event is not None:
@@ -1574,8 +1849,18 @@ def main():
 def mic_command(args, restart=True):
     """`whisper-ptt mic [NAME|default]`: list microphones, or choose one and restart."""
     config_path = CONFIG_PATH
-    cfg = load_config()
+    # With --json the output is read by a program: remarks about the settings go to stderr.
+    with contextlib.redirect_stdout(sys.stderr) if args == ["--json"] else contextlib.nullcontext():
+        cfg = load_config()
     mics = list_microphones()
+    if args == ["--json"]:               # for the GNOME menu
+        wanted = wanted_microphone(cfg)
+        chosen = find_microphone(wanted, mics or []) if wanted else None
+        print(json.dumps({"wanted": wanted, "connected": bool(chosen) or not wanted,
+                          "microphones": [{"name": name, "description": desc,
+                                           "chosen": bool(chosen) and chosen[0] == name}
+                                          for name, desc in mics or []]}))
+        return 0
     if not args:
         wanted = wanted_microphone(cfg)
         chosen = find_microphone(wanted, mics or []) if wanted else None

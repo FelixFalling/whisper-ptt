@@ -45,11 +45,17 @@ struct SetupView: View {
                 .padding(.top, 16)
             }
 
-            Text("Switched on in System Settings but not ticked here? macOS ties each permission to one build of the app: remove Whisper PTT from that list with the minus button, then allow it again.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if !d.missing.isEmpty {
+                HStack(alignment: .top, spacing: 12) {
+                    Text("Switched on in System Settings but not ticked here? That switch belongs to an earlier build of the app. Reset forgets those entries and opens Whisper PTT again, so macOS asks afresh.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button("Reset") { Permissions.resetAndRelaunch() }
+                }
                 .padding(.top, 16)
+            }
 
             HStack {
                 Label("Find it in the menu bar", systemImage: "waveform")
@@ -90,6 +96,29 @@ struct PermissionRow: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
+    }
+}
+
+/// Forgets what macOS remembers about this app's permissions, then opens it again.
+enum Permissions {
+    static func resetAndRelaunch() {
+        let id = Bundle.main.bundleIdentifier ?? "com.felixfalling.whisper-ptt"
+        for service in ["Accessibility", "ListenEvent", "PostEvent", "Microphone"] {
+            let reset = Process()
+            reset.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            reset.arguments = ["reset", service, id]
+            reset.standardOutput = FileHandle.nullDevice
+            reset.standardError = FileHandle.nullDevice
+            try? reset.run()
+            reset.waitUntilExit()
+            Log.write("reset \(service) for \(id): exit \(reset.terminationStatus)")
+        }
+        // A new instance once this one has quit, so the event tap and the checks start clean.
+        let again = Process()
+        again.executableURL = URL(fileURLWithPath: "/bin/sh")
+        again.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", Bundle.main.bundlePath]
+        try? again.run()
+        NSApp.terminate(nil)
     }
 }
 

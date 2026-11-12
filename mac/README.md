@@ -97,10 +97,12 @@ open -n -W "/Applications/Whisper PTT.app" --args --snapshot /tmp/shots   # menu
 Make a test WAV with `say -o s.aiff "some words"` and
 `afconvert -f WAVE -d LEI16@16000 -c 1 s.aiff s.wav`.
 
-The app is signed ad hoc, which needs no Apple developer account. macOS ties the
-permissions it grants to that exact build, so after installing a changed app, the welcome
-window asks again. If System Settings already shows Whisper PTT switched on, remove it from
-the list with the minus button and allow it again. Raise `CFBundleShortVersionString` and
+The app is signed with a certificate made on the Mac itself (`signing.sh`, which `build.sh`
+runs; no Apple developer account). macOS ties the permissions it grants to that
+certificate, so a new build keeps them. Builds before 1.2 were signed ad hoc, which tied
+them to one exact build: if System Settings shows Whisper PTT switched on but the app says
+a permission is missing, click **Reset** in its welcome window. That forgets the stale
+entries and opens the app again, and macOS asks once more. Raise `CFBundleShortVersionString` and
 `CFBundleVersion` in `mac/app/Info.plist` when you change the app.
 
 Do not use `@State` in the views: in the macOS 27 SDK it is a macro whose plugin only comes

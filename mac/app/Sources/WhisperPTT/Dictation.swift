@@ -464,7 +464,10 @@ final class Dictation: ObservableObject {
         case .inputMonitoring where firstTime:
             CGRequestListenEventAccess()
         default:
+            // Asked before and still missing: often a stale entry from an earlier build.
+            // The welcome window has the Reset for that.
             NSWorkspace.shared.open(permission.settings)
+            SetupWindow.show(self)
         }
     }
 

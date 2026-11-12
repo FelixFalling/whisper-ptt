@@ -22,9 +22,18 @@ cp Info.plist "$APP/Contents/Info.plist"
 cp Resources/fallback.py "$APP/Contents/Resources/"
 swift Tools/make-icon.swift build/AppIcon.iconset
 iconutil -c icns build/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
-# Ad hoc signing needs no Apple account. macOS ties the permissions it grants to this exact
-# signature, so a changed app has to be allowed again (the setup window explains how).
-codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
+# Signed with this Mac's own certificate (signing.sh), so the permissions macOS grants
+# carry over to the next build. Ad hoc signing named the exact build, and every rebuild
+# had to be allowed again. Ad hoc stays the fallback when the certificate cannot be made.
+KC="$HOME/Library/Keychains/whisper-ptt-signing.keychain-db"
+if ./signing.sh >/dev/null && IDENTITY="$(security find-identity -p codesigning "$KC" |
+     awk '/"Whisper PTT Local Signing"/ {print $2; exit}')" && [[ -n "$IDENTITY" ]]; then
+  codesign --force --sign "$IDENTITY" --keychain "$KC" --identifier "$BUNDLE_ID" "$APP"
+else
+  echo "warning: no signing certificate; signing ad hoc, so macOS will ask for every permission again" >&2
+  codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
+fi
+codesign --verify --strict "$APP"
 
 rm -rf build/dmg build/Whisper-PTT.dmg
 mkdir build/dmg

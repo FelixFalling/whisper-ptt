@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Mac app 1.2: signed with a certificate made on the Mac (`mac/app/signing.sh`) instead of
+  ad hoc, so the permissions macOS grants survive rebuilds. Ad hoc builds showed
+  "Allow Accessibility" while System Settings had Whisper PTT switched on, because that
+  switch belonged to an earlier build. The welcome window has a Reset for such entries.
 - GNOME: the Whisper button has a menu (microphone, copy the last dictation, log,
   settings file) and says what dictation is doing; the top-bar microphone turns into a
   red dot while recording, three dots while transcribing and a warning when something

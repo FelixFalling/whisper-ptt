@@ -24,6 +24,9 @@ if ! systemctl --user is-active --quiet whisper-ptt.service; then
     systemctl --user status whisper-ptt.service --no-pager || true
     exit 1
 fi
+# The remote switch for the Mac. It exits by itself unless "server" is on in config.json.
+systemctl --user enable --quiet whisper-ptt-control.service
+systemctl --user restart whisper-ptt-control.service
 echo "Deployed commit $(git rev-parse --short HEAD) to the local service."
 if [[ -n "$(git status --porcelain)" ]]; then
     echo 'Working tree has uncommitted changes; the service is running those files too.'

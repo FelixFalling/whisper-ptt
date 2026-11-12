@@ -21,6 +21,7 @@ out.chmod(0o600)
 PY
 cd "$HERE/.."
 rm -f whisper-ptt-mac.zip
+umask 077          # the zip holds the token
 zip -q -r whisper-ptt-mac.zip mac -x 'mac/__pycache__/*' 'mac/mac.example.json' 'mac/package.sh' 'mac/app/*'
 echo "built $(pwd)/whisper-ptt-mac.zip; send it to the Mac with:"
 echo "  sudo tailscale file cp $(pwd)/whisper-ptt-mac.zip <your-mac-tailscale-name>:"

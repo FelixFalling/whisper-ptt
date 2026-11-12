@@ -15,9 +15,7 @@ struct Panel: View {
             Separator()
             notices
             connection
-            ToggleRow(icon: "sparkles", title: "Cleanup",
-                      detail: d.cleanup ? "Fixes grammar and filler words" : "Types your words as spoken",
-                      isOn: $d.cleanup)
+            ToggleRow(icon: "sparkles", title: "Cleanup", detail: cleanupDetail, isOn: $d.cleanup)
                 .disabled(!d.enabled)
             if let last = d.last {
                 Separator()
@@ -51,7 +49,7 @@ struct Panel: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Whisper").font(.system(size: 13, weight: .semibold))
+                Text("Whisper on this Mac").font(.system(size: 13, weight: .semibold))
                 Text(status).font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer()
@@ -61,6 +59,15 @@ struct Panel: View {
         .padding(.horizontal, 10)
         .padding(.top, 6)
         .padding(.bottom, 4)
+    }
+
+    /// Cleanup is the desktop's work; this Mac's own transcriber types the words as spoken.
+    private var cleanupDetail: String {
+        if !d.cleanup { return "Types your words as spoken" }
+        switch d.link {
+        case .off, .starting, .away: return "Resumes when the desktop transcribes"
+        default: return "Fixes grammar and filler words"
+        }
     }
 
     private var status: String {
@@ -95,19 +102,35 @@ struct Panel: View {
         case .checking:
             Row(icon: "desktopcomputer", tint: nil, title: "Looking for the desktop…",
                 detail: "Over Tailscale")
-        case .desktop(let name):
+        case .desktop(let name) where !d.remoteSwitch:
+            // A desktop without the remote switch (an older whisper-ptt there).
             Row(icon: "desktopcomputer", tint: .accentColor, title: name,
                 detail: "Connected, transcribes on its graphics card") { d.refreshLink() }
+        case .desktop(let name):
+            desktopSwitch(name, "On, transcribes on its graphics card")
+        case .starting(let name):
+            desktopSwitch(name, "Starting…")
+        case .off(let name):
+            desktopSwitch(name, d.fallbackAvailable ? "Off. This Mac transcribes instead"
+                                                    : "Off. Switch it on to dictate")
         case .away:
             Row(icon: d.fallbackAvailable ? "laptopcomputer" : "desktopcomputer",
-                tint: d.fallbackAvailable ? .orange : nil, title: "Desktop unavailable",
-                detail: d.fallbackAvailable ? "Using this Mac: slower, no cleanup"
-                                            : "Turn Whisper on at the desktop") { d.refreshLink() }
+                tint: d.fallbackAvailable ? .orange : nil, title: "Desktop not reachable",
+                detail: d.fallbackAvailable ? "This Mac transcribes instead"
+                                            : "Asleep, shut down, or not on Tailscale") { d.refreshLink() }
         case .notSetUp(let why):
             Row(icon: "desktopcomputer", tint: nil, title: "Desktop not set up", detail: why) {
                 NSWorkspace.shared.open(Config.url)
             }
         }
+    }
+
+    /// The desktop's own Whisper switch, flipped from here over Tailscale.
+    private func desktopSwitch(_ name: String, _ detail: String) -> some View {
+        ToggleRow(icon: "desktopcomputer", title: "Whisper on \(name)",
+                  detail: d.switching.map { $0 ? "Switching on…" : "Switching off…" } ?? detail,
+                  isOn: Binding(get: { d.desktopOn }, set: { d.setDesktop($0) }))
+            .disabled(d.switching != nil)
     }
 
     private func lastDictation(_ last: Dictation.Result) -> some View {
@@ -200,9 +223,10 @@ struct ToggleRow: View {
                 HStack(spacing: 10) {
                     RoundIcon(symbol: icon, tint: isOn && isEnabled ? .accentColor : nil)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(title).font(.system(size: 13))
-                        Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text(title).font(.system(size: 13)).lineLimit(1)
+                        Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
                     }
+                    .multilineTextAlignment(.leading)
                     Spacer(minLength: 0)
                 }
                 .opacity(isEnabled ? 1 : 0.5)

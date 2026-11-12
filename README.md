@@ -13,7 +13,7 @@ Open GNOME's top-right system menu:
 | **Whisper** | Turns dictation and cleanup on together. Off stops dictation, disables cleanup, and requests unloading the cleanup model. |
 | **Cleanup** | Enables rewriting or types as spoken while dictation remains running. Off requests unloading the cleanup model. Disabled while Whisper is off. |
 
-Stopping dictation also stops the optional Mac transcription server. These controls do not change the service's login preference. GPU memory used by other applications is unaffected. The indicator reflects the service state, not whether the microphone and GPU have finished initializing.
+Stopping dictation also stops the optional Mac transcription server; the Mac can switch Whisper back on from its own menu (see [Mac menu bar app](#mac-menu-bar-app)). These controls do not change the service's login preference. GPU memory used by other applications is unaffected. The indicator reflects the service state, not whether the microphone and GPU have finished initializing.
 
 Text is inserted using a virtual keyboard, without touching the Linux clipboard. A US keyboard layout is assumed; unsupported characters are normalized. The trigger is read through Linux input devices, including on Wayland.
 
@@ -98,23 +98,25 @@ systemd prefix on every line. Press Ctrl+C to leave the viewer.
 
 ## Mac menu bar app
 
-**Whisper PTT.app** brings the same dictation to a Mac. Hold **right Option**, speak, and release: the Mac records, the desktop transcribes on its GPU (and cleans up the text if you want), and the Mac pastes the result where the cursor is. When the desktop is off or unreachable, the Mac transcribes locally with a slower model and no cleanup.
+**Whisper PTT.app** brings the same dictation to a Mac. Hold **right Option**, speak, and release: the Mac records, the desktop transcribes on its GPU (and cleans up the text if you want), and the Mac pastes the result where the cursor is. When Whisper is off at the desktop, or the desktop is unreachable, the Mac transcribes locally, without cleanup.
 
 Click the waveform in the Mac's menu bar:
 
 | Control | What it does |
 | --- | --- |
-| **Whisper** | Turns dictation on the Mac on or off. Off, right Option is an ordinary key again. |
+| **Whisper on this Mac** | Turns dictation on the Mac on or off. Off, right Option is an ordinary key again. |
+| **Whisper on _desktop name_** | Turns Whisper on or off at the desktop, over Tailscale. It is the same switch as the Whisper button in the desktop's GNOME menu. When the desktop is asleep or off the tailnet, the row says so instead; click it to look again. |
 | **Cleanup** | Cleaned-up text, or your words as spoken. Applies only to the Mac's dictations; the desktop's own Cleanup switch is unaffected. |
-| Desktop row | Whether the desktop answers; click to check again. |
 | **Last dictation** | Click to copy it again. |
 | **Open at Login** | Starts the app at login. |
 
-The Mac cannot switch the desktop on. If Whisper is off at the desktop, the Mac uses its local fallback until you turn it back on there (`make start` or the GNOME Whisper button).
+The Mac cannot wake a desktop that is asleep or shut down; until the desktop is back, the Mac uses its local fallback.
+
+The desktop's switch is answered by a second small service, `whisper-ptt-control.service` (`bin/whisper-control.py`). The transcription server stops together with Whisper, so this one stays up, one port above it (8766 beside 8765). It accepts two requests, "what is the state" and "switch on or off", with the same token, from tailnet addresses only. `"server_control": false` in `config.json` turns it off.
 
 ### Set up the desktop
 
-In `~/.config/whisper-ptt/config.json`, set `"server": true` and a randomly generated `server_token`, then `make deploy`. The server listens only on this machine's Tailscale address, and every request must carry the token. Run `bash mac/package.sh` to build `whisper-ptt-mac.zip`, which holds the Mac's settings file with that token: share it privately and never commit it.
+In `~/.config/whisper-ptt/config.json`, set `"server": true` and a randomly generated `server_token`, then `make deploy`. Both services listen only on this machine's Tailscale address, answer only peers that have a tailnet address themselves, and every request must carry the token. Run `bash mac/package.sh` to build `whisper-ptt-mac.zip`, which holds the Mac's settings file with that token: share it privately and never commit it.
 
 ### Install on the Mac
 

@@ -10,8 +10,10 @@ final class Dictation: ObservableObject {
 
     enum Link: Equatable {
         case checking
-        case desktop(String)            // connected, with the desktop's name
-        case away
+        case desktop(String)            // Whisper is on there and answers; the desktop's name
+        case starting(String)           // Whisper is on there but does not answer yet
+        case off(String)                // the desktop is up, Whisper is switched off there
+        case away                       // nothing answers: asleep, shut down, or no Tailscale
         case notSetUp(String)           // what is missing from mac.json
     }
 
@@ -36,6 +38,8 @@ final class Dictation: ObservableObject {
     @Published private(set) var recording = false   // a press that outlasted min_duration
     @Published private(set) var busy = 0            // dictations being transcribed or pasted
     @Published private(set) var link = Link.checking
+    @Published private(set) var remoteSwitch = false    // the desktop's switch answers: Whisper there can be flipped from here
+    @Published private(set) var switching: Bool?        // the position the desktop is being switched to
     @Published private(set) var last: Result?
     @Published private(set) var problem: String?    // the last thing that went wrong
     @Published private(set) var missing: [Permission] = []
@@ -57,8 +61,11 @@ final class Dictation: ObservableObject {
     private var warm: Task<Bool, Never>?
     private var queue: Task<Void, Never>?           // the newest dictation; each awaits the one before
     private var asked: Set<Permission> = []
-    private var ticks = 0
     private var timer: Timer?
+    private var checks = 0                          // raised by a switch: a check begun before it is stale
+    private var checkInFlight = false
+    private var lastCheck = Date.distantPast
+    private var startingSince = Date.distantPast
     private var previewing = false                  // drawn by --snapshot, not live
 
     init() {
@@ -92,8 +99,15 @@ final class Dictation: ObservableObject {
         refreshPermissions()
         refreshLink()
         checkTerminalClient()
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
+        schedule()
+        // What was true before the lid closed need not be now. Tailscale takes a moment.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(4))
+                self?.refreshLink()
+            }
         }
         if !missing.isEmpty || configProblem != nil { SetupWindow.show(self) }
     }
@@ -152,8 +166,14 @@ final class Dictation: ObservableObject {
     /// tells whether the desktop is reachable at all.
     private func startWarming() -> Task<Bool, Never>? {
         guard let desktop else {
-            if fallbackAvailable { local.prepare() }
+            prepareLocal()
             return nil
+        }
+        // Already known not to answer: load this Mac's model now, not after the timeout.
+        // The desktop is still asked, in case it came back since the last check.
+        switch link {
+        case .off, .away, .starting: prepareLocal()
+        default: break
         }
         let cleanup = cleanup, timeout = config.connectTimeout
         return Task {
@@ -162,11 +182,18 @@ final class Dictation: ObservableObject {
                 return true
             } catch {
                 Log.write("desktop not reachable: \(error.localizedDescription)")
-                link = .away
-                if fallbackAvailable { local.prepare() }
+                prepareLocal()
+                switch link {
+                case .desktop, .checking: refreshLink()     // switched off there, or gone?
+                default: break
+                }
                 return false
             }
         }
+    }
+
+    private func prepareLocal() {
+        if fallbackAvailable { local.prepare(config) }
     }
 
     private func end() {
@@ -217,9 +244,13 @@ final class Dictation: ObservableObject {
         }
         let took = Date().timeIntervalSince(begun)
         guard var text else {
-            fail(fallbackAvailable
-                 ? "Neither the desktop nor this Mac could transcribe that"
-                 : "The desktop could not transcribe that. Is Whisper on there?")
+            if fallbackAvailable {
+                fail("Neither the desktop nor this Mac could transcribe that")
+            } else if case .off = link {
+                fail("Whisper is off on the desktop. Switch it on in this menu.")
+            } else {
+                fail("The desktop could not transcribe that. Is it awake?")
+            }
             return
         }
         Log.write(String(format: "%.1fs of speech -> %.2fs on %@, %d characters", speech, took, place, text.count))
@@ -258,6 +289,38 @@ final class Dictation: ObservableObject {
             }
         }
         refreshPermissions()
+        if timer != nil { schedule() }
+    }
+
+    /// Whisper at the desktop, as the menu's switch shows it.
+    var desktopOn: Bool {
+        if let switching { return switching }
+        switch link {
+        case .desktop, .starting: return true
+        default: return false
+        }
+    }
+
+    /// Switches Whisper on or off at the desktop, like the Whisper button in its own menu.
+    func setDesktop(_ on: Bool) {
+        guard !previewing, let desktop, switching == nil, on != desktopOn else { return }
+        switching = on
+        checks += 1                     // a check already on its way would show the old position
+        Task {
+            do {
+                let now = try await desktop.setPower(on, timeout: 100)
+                Log.write("switched Whisper \(on ? "on" : "off") at \(now.host)"
+                          + (now.note.map { ": \($0)" } ?? ""))
+                switching = nil
+                remoteSwitch = true
+                problem = nil
+                setLink(on ? .starting(now.host) : .off(now.host))
+            } catch {
+                switching = nil
+                fail("Could not switch Whisper \(on ? "on" : "off") on the desktop: \(error.localizedDescription)")
+                refreshLink()
+            }
+        }
     }
 
     func copyLast() {
@@ -289,19 +352,54 @@ final class Dictation: ObservableObject {
         checkTerminalClient()
     }
 
+    /// Asks the desktop's two servers at once: the transcriber, which answers while Whisper
+    /// is on there, and the remote switch, which answers whenever the desktop is up.
     func refreshLink() {
-        guard let desktop else { return }
+        guard let desktop, switching == nil, !checkInFlight else { return }
+        checkInFlight = true
+        let check = checks
+        lastCheck = Date()
         Task {
-            let now: Link
-            do {
-                now = .desktop(try await desktop.health(timeout: 3))
-            } catch {
-                now = .away
-                if link != .away { Log.write("desktop away: \(error.localizedDescription)") }
+            async let transcriber = Self.outcome { try await desktop.health(timeout: 3) }
+            async let power = Self.outcome { try await desktop.state(timeout: 3) }
+            let (health, state) = await (transcriber, power)
+            checkInFlight = false
+            guard check == checks else {
+                refreshLink()                           // the desktop was switched meanwhile: ask again
+                return
             }
-            if case .desktop(let name) = now, now != link { Log.write("connected to \(name)") }
-            link = now
+            remoteSwitch = (try? state.get()) != nil
+            switch (health, state) {
+            case (.success(let name), _):
+                setLink(.desktop(name))
+            case (.failure, .success(let state)):
+                setLink(state.active ? .starting(state.host) : .off(state.host))
+            case (.failure(let error), .failure):
+                setLink(.away, why: error.localizedDescription)
+            }
         }
+    }
+
+    private static func outcome<T>(_ work: () async throws -> T) async -> Swift.Result<T, Error> {
+        do {
+            return .success(try await work())
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func setLink(_ now: Link, why: String? = nil) {
+        guard now != link else { return }
+        switch now {
+        case .desktop(let name): Log.write("connected to \(name)")
+        case .starting(let name): Log.write("Whisper is starting on \(name)")
+        case .off(let name): Log.write("\(name) is up, Whisper is off there")
+        case .away: Log.write("desktop away" + (why.map { ": \($0)" } ?? ""))
+        case .checking, .notSetUp: break
+        }
+        if case .starting = now { startingSince = Date() }
+        link = now
+        if timer != nil { schedule() }
     }
 
     private func checkTerminalClient() {
@@ -311,11 +409,33 @@ final class Dictation: ObservableObject {
         }
     }
 
+    /// Every two seconds while something is about to change (a permission being granted,
+    /// Whisper starting at the desktop), otherwise once a minute. It used to wake the Mac
+    /// every two seconds for as long as the app ran.
     private func tick() {
         if enabled, !watcher.isRunning { watcher.start() }   // succeeds once macOS allows it
         refreshPermissions()
-        ticks += 1
-        if ticks % 30 == 0 { refreshLink() }               // once a minute
+        if isStarting || Date().timeIntervalSince(lastCheck) >= 55 { refreshLink() }
+        if config.fallbackKeepLoaded > 0, busy == 0, !capturing {
+            local.retire(idleFor: config.fallbackKeepLoaded)
+        }
+        schedule()
+    }
+
+    private var isStarting: Bool {
+        if case .starting = link { return Date().timeIntervalSince(startingSince) < 60 }
+        return false
+    }
+
+    private func schedule() {
+        let soon = !missing.isEmpty || (enabled && !watcher.isRunning) || isStarting
+        timer?.invalidate()
+        let next = Timer(timeInterval: soon ? 2 : 60, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        next.tolerance = soon ? 0.3 : 6
+        RunLoop.main.add(next, forMode: .common)
+        timer = next
     }
 
     // MARK: Permissions
@@ -325,7 +445,10 @@ final class Dictation: ObservableObject {
         if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized { now.append(.microphone) }
         if !AXIsProcessTrusted() { now.append(.accessibility) }
         if !watcher.isRunning, !CGPreflightListenEventAccess() { now.append(.inputMonitoring) }
-        if now != missing { missing = now }
+        if now != missing {
+            missing = now
+            if timer != nil { schedule() }
+        }
     }
 
     /// The first time, macOS's own prompt; after that, the page in System Settings.
@@ -356,8 +479,9 @@ final class Dictation: ObservableObject {
     }
 
     func preview(link: Link, last: Result?, missing: [Permission] = [], problem: String? = nil,
-                 recording: Bool = false) {
+                 recording: Bool = false, remoteSwitch: Bool = true) {
         previewing = true
+        self.remoteSwitch = remoteSwitch
         self.link = link
         self.last = last
         self.missing = missing

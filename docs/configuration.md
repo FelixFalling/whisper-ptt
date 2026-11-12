@@ -104,7 +104,8 @@ The UI will create an override again the next time you use its switches. Whisper
 
 - `min_duration`: ignore trigger presses shorter than this many seconds.
 - `notify`, `notify_timeout_ms`: notification behavior.
-- `server`, `server_host`, `server_port`, `server_token`: optional network dictation. Keep the token private; use Tailscale and leave the server disabled if you do not need it.
+- `server`, `server_host`, `server_port`, `server_token`: optional network dictation. Keep the token private; use Tailscale and leave the server disabled if you do not need it. With `server_host` at `"tailscale"`, only peers with a tailnet address of their own are answered; a host set by hand is not filtered.
+- `server_control` (default `true`), `control_port` (default: `server_port` + 1): the remote switch, `whisper-ptt-control.service`, which lets the Mac turn Whisper on and off at the desktop. It runs only while `server` is on and uses the same address and token. `make deploy` enables and restarts it; it reads the token on every request, so a changed token needs no restart of this service.
 - The Mac client's separate device settings remain in `~/.config/whisper-ptt/mac.json` on the Mac.
 - The Mac app's Cleanup switch is sent with each of its requests and applies only to the Mac's dictations. The Terminal client sends none, so the desktop's cleanup setting decides for it.
 

@@ -6,6 +6,7 @@ R="$(cd "$(dirname "$0")" && pwd)"
 link() { mkdir -p "$(dirname "$2")"; ln -sfn "$1" "$2"; echo "linked $2"; }
 link "$R/bin/whisper-ptt" "$HOME/.local/bin/whisper-ptt"
 link "$R/systemd/whisper-ptt.service" "$HOME/.config/systemd/user/whisper-ptt.service"
+link "$R/systemd/whisper-ptt-control.service" "$HOME/.config/systemd/user/whisper-ptt-control.service"
 link "$R/gnome-extension/whisper-polish@felixfalling" \
      "$HOME/.local/share/gnome-shell/extensions/whisper-polish@felixfalling"
 if [ ! -f "$HOME/.config/whisper-ptt/config.json" ]; then
@@ -18,5 +19,6 @@ cat <<MSG
 Then, once:
   sudo cp $R/udev/70-whisper-ptt-input.rules /etc/udev/rules.d/ && sudo udevadm control --reload
   systemctl --user enable --now whisper-ptt
+  systemctl --user enable --now whisper-ptt-control        (only with "server": true: lets the Mac switch Whisper on and off)
   gnome-extensions enable whisper-polish@felixfalling      (after logging out and in)
 MSG

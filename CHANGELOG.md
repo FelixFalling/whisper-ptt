@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Switch Whisper on and off at the desktop from the Mac's menu. A new always-on service,
+  `whisper-ptt-control.service`, answers the Mac when the dictation service is stopped.
+  Mac app 1.1 shows the desktop's switch, tells "Whisper is off there" from "desktop not
+  reachable", and has `--desktop on|off|status` for the command line.
+- Server hardening: answer only peers with a tailnet address (binding to the Tailscale
+  address did not keep a LAN machine out), drop connections that go quiet, never follow a
+  redirect from the Mac, warn about a short token, keep the token zip private.
+- Mac fallback: load the model while the key is held, decode and punctuate like the
+  desktop, return nothing for a silent recording, and stop the helper after ten idle
+  minutes so its memory is free again.
+- Mac app: check on the desktop and its permissions once a minute instead of every two
+  seconds, and again after waking from sleep.
+- A failed cleanup of the Mac's dictation no longer raises a banner on the desktop;
+  `whisper-ptt polish on` warms the model at the configured `ollama_url`.
 - Add Whisper PTT.app, a menu bar app for the Mac with Whisper and Cleanup switches,
   a welcome window for its permissions, and `make mac-app` / `make mac-install` to build
   it on the Mac over SSH.

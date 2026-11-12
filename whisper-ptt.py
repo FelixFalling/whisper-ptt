@@ -20,6 +20,7 @@ import fcntl
 import gc
 import hmac
 import io
+import ipaddress
 import json
 import os
 import queue
@@ -130,6 +131,9 @@ DEFAULTS = {
     "server_host": "tailscale",
     "server_port": 8765,
     "server_token": "",
+    # The remote switch (bin/whisper-control.py, whisper-ptt-control.service): lets the Mac
+    # turn this service on and off, one port above server_port. Read by that script.
+    "server_control": True,
     # Polish: a local model fixes grammar, splits run-ons and removes filler words before
     # the text is typed. Enabled by default; `whisper-ptt polish off` turns it off without a restart. qwen3:14b takes
     # ~0.9 s once loaded (4.4 s cold) and holds ~9 GB of VRAM until polish_keep_alive
@@ -1121,6 +1125,21 @@ class LiveSession:
 
 # ------------------------------------------------------------------ the MacBook server
 MAX_UPLOAD = 25 * 1024 * 1024      # about 13 minutes of 16 kHz speech
+# Every Tailscale device has an address in one of these. Binding to the Tailscale address
+# alone does not keep the LAN out: Linux answers for any of its addresses on any interface,
+# so a machine on the LAN that routes this address our way would get through. Tailscale's
+# firewall rules drop packets that claim a tailnet address on another interface, so a peer
+# inside these ranges did come through the tailnet.
+TAILNET = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+
+
+def from_tailnet(address):
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    ip = getattr(ip, "ipv4_mapped", None) or ip
+    return any(ip in net for net in TAILNET)
 
 
 def tailscale_ip():
@@ -1141,10 +1160,14 @@ def wav_to_float32(data):
     return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def make_server(holder, cfg, host):
+def make_server(holder, cfg, host, tailnet_only=False):
     token = cfg["server_token"]
 
     class Handler(BaseHTTPRequestHandler):
+        # A connection that goes quiet is dropped. Without this, one that sent nothing (or
+        # stopped halfway through an upload) held its thread for as long as the service ran.
+        timeout = 30
+
         def log_message(self, fmt, *args):
             pass                         # the journal gets our own one-line summaries
 
@@ -1156,9 +1179,16 @@ def make_server(holder, cfg, host):
             self.end_headers()
             self.wfile.write(body)
 
-        def _authorized(self):
+        def _refused(self):
+            """Answers and returns True unless the request may go ahead."""
+            if tailnet_only and not from_tailnet(self.client_address[0]):
+                self._reply(403, {"error": "not from the tailnet"})
+                return True
             given = self.headers.get("Authorization", "")
-            return hmac.compare_digest(given.encode(), f"Bearer {token}".encode())
+            if not hmac.compare_digest(given.encode(), f"Bearer {token}".encode()):
+                self._reply(401, {"error": "unauthorized"})
+                return True
+            return False
 
         def _cleanup(self):
             """The Mac app's own Cleanup switch, sent with every request, so switching it
@@ -1168,16 +1198,16 @@ def make_server(holder, cfg, host):
             return {"on": True, "off": False}.get(wanted, polish_on(cfg))
 
         def do_GET(self):
-            if not self._authorized():
-                return self._reply(401, {"error": "unauthorized"})
+            if self._refused():
+                return
             if self.path == "/health":
                 return self._reply(200, {"ok": True, "loaded": holder.loaded,
                                          "model": cfg["model"], "host": os.uname().nodename})
             self._reply(404, {"error": "not found"})
 
         def do_POST(self):
-            if not self._authorized():
-                return self._reply(401, {"error": "unauthorized"})
+            if self._refused():
+                return
             if self.path == "/warm":
                 holder.preload_async()
                 if self._cleanup():     # as a local press does, so the Mac skips the cold load
@@ -1196,6 +1226,8 @@ def make_server(holder, cfg, host):
                 audio = wav_to_float32(self.rfile.read(size))
             except Exception as exc:
                 return self._reply(400, {"error": str(exc)})
+            if audio.size == 0:
+                return self._reply(200, {"text": ""})
             t0 = time.time()
             try:
                 text = transcribe_audio(holder, cfg, audio)
@@ -1206,7 +1238,8 @@ def make_server(holder, cfg, host):
             after_success()
             took = time.time() - t0
             raw = text
-            text, note = maybe_polish(cfg, text, polishing=self._cleanup())
+            # quiet: a failed cleanup of the Mac's words is no banner on this desktop.
+            text, note = maybe_polish(cfg, text, quiet=True, polishing=self._cleanup())
             text = _short_entry(text, cfg["short_entry_min_words"])
             log_dictation(raw, text,
                           f"audio {audio.size / SAMPLE_RATE:.1f}s · transcription {took:.2f}s{note}",
@@ -1225,14 +1258,21 @@ def serve(holder, cfg):
 
     Every request carries "Authorization: Bearer <server_token>". The Mac app also sends
     "X-Whisper-Cleanup: on|off" to choose cleanup for its own dictations.
+
+    This server stops with the service. bin/whisper-control.py, a unit of its own, is what
+    the Mac asks to switch the service back on.
     """
     host = cfg["server_host"]
+    tailnet_only = host == "tailscale"   # a host set by hand is taken at its word
     while host == "tailscale":           # tailscaled may come up after us at login
         host = tailscale_ip() or "tailscale"
         if host == "tailscale":
             time.sleep(30)
+    if len(cfg["server_token"]) < 20:
+        log("warning: server_token is short; use a long random one "
+            "(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')")
     try:
-        srv = make_server(holder, cfg, host)
+        srv = make_server(holder, cfg, host, tailnet_only)
     except OSError as exc:
         log(f"network dictation off: cannot listen on {host}:{cfg['server_port']}: {exc}")
         return

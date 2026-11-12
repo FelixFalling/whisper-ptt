@@ -5,6 +5,7 @@ import Foundation
 /// flipping them never rewrites this file.
 struct Config {
     var server = ""
+    var control = ""                // the desktop's remote switch; empty: one port above `server`
     var token = ""
     var key = "alt_r"
     var minDuration = 0.35          // shorter presses are ignored
@@ -14,6 +15,10 @@ struct Config {
     var fallback = true             // transcribe on this Mac when the desktop is away
     var fallbackModel = "mlx-community/whisper-large-v3-turbo"
     var fallbackPython = "~/.local/share/whisper-ptt-mac/venv/bin/python"   // mac/install.sh makes it
+    // The fallback's model stays in memory this long after its last use, then its helper
+    // is stopped and the memory (about 1.6 GB) is free again. 0 keeps it for good.
+    var fallbackKeepLoaded = 600.0
+    var shortEntryMinWords = 4      // the fallback drops the full stop of shorter entries, as the desktop does
     var connectTimeout = 1.5        // how long to wait for the desktop before falling back
     // The Terminal client waits 30 s. A long dictation with cleanup can take longer on the
     // desktop, and giving up early would type it from this Mac without cleanup.
@@ -37,6 +42,7 @@ struct Config {
             if let found = json[key] as? T { value = found }
         }
         read("server", &cfg.server)
+        read("control", &cfg.control)
         read("token", &cfg.token)
         read("key", &cfg.key)
         read("min_duration", &cfg.minDuration)
@@ -46,6 +52,8 @@ struct Config {
         read("fallback", &cfg.fallback)
         read("fallback_model", &cfg.fallbackModel)
         read("fallback_python", &cfg.fallbackPython)
+        read("fallback_keep_loaded", &cfg.fallbackKeepLoaded)
+        read("short_entry_min_words", &cfg.shortEntryMinWords)
         read("connect_timeout", &cfg.connectTimeout)
         read("transcribe_timeout", &cfg.transcribeTimeout)
         read("sounds", &cfg.sounds)
@@ -57,7 +65,23 @@ struct Config {
         if cfg.token.isEmpty || cfg.token.hasPrefix("REPLACE_") {
             return (cfg, "Add the desktop's server_token as \"token\" in mac.json")
         }
+        if cfg.controlURL == nil {
+            return (cfg, "\"control\" in mac.json is not an address")
+        }
         return (cfg, nil)
+    }
+
+    /// Where the desktop's remote switch listens: `control` when set, otherwise the same
+    /// address as `server`, one port up (8766 beside 8765).
+    var controlURL: URL? {
+        if !control.isEmpty {
+            let url = URL(string: control)
+            return url?.host == nil ? nil : url
+        }
+        guard var parts = URLComponents(string: server), parts.host != nil else { return nil }
+        parts.port = (parts.port ?? (parts.scheme == "https" ? 443 : 80)) + 1
+        parts.path = ""
+        return parts.url
     }
 
     var fallbackPythonPath: String { (fallbackPython as NSString).expandingTildeInPath }

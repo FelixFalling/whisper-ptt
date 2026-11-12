@@ -5,7 +5,7 @@ import SwiftUI
 enum Entry {
     static func main() {
         let args = CommandLine.arguments
-        if args.contains("--check") {
+        if args.contains("--check") || args.contains("--desktop") {
             exit(Check.run(args))
         }
         if let flag = args.firstIndex(of: "--snapshot"), args.indices.contains(flag + 1) {

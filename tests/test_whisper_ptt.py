@@ -696,6 +696,47 @@ class ServerTests(unittest.TestCase):
             code = e.code
         self.assertEqual(code, 400)
 
+    # Bound to the Tailscale address, Linux still answers a LAN machine that routes that
+    # address its way (2026-11-12). With server_host "tailscale", only peers that have a
+    # tailnet address themselves are served; 127.0.0.1 is not one.
+    def test_peers_outside_the_tailnet_are_refused(self):
+        srv = W.make_server(self.holder, CFG, "127.0.0.1", tailnet_only=True)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        self.url = f"http://127.0.0.1:{srv.server_address[1]}"
+        self.assertEqual(self.post("/transcribe", wav())[0], 403)
+        self.assertEqual(self.holder.heard, [])
+        self.assertTrue(W.from_tailnet("100.101.102.103"))
+        self.assertTrue(W.from_tailnet("fd7a:115c:a1e0::5"))
+        self.assertFalse(W.from_tailnet("192.168.1.20"))
+        self.assertFalse(W.from_tailnet("100.128.0.1"))
+
+    # BUG: a connection that sent nothing held its thread until the service stopped.
+    def test_a_silent_connection_is_dropped(self):
+        import socket
+        with patch.object(self.srv.RequestHandlerClass, "timeout", 0.3):
+            with socket.create_connection(self.srv.server_address, timeout=5) as quiet:
+                self.assertEqual(quiet.recv(1), b"")        # closed by the server, not by us
+
+    def test_an_empty_recording_is_no_text_and_no_model_call(self):
+        empty = io.BytesIO()
+        with wave.open(empty, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SR)
+        self.assertEqual(self.post("/transcribe", empty.getvalue()), (200, {"text": ""}))
+        self.assertEqual(self.holder.heard, [])
+
+    # A failed cleanup of the Mac's words must not raise a banner on the desktop.
+    def test_a_failed_cleanup_for_the_mac_shows_no_banner_here(self):
+        self.holder.text = "so um this is a long enough dictation to clean"
+        with patch.object(W, "log_dictation"), patch.object(W, "notify") as banner, \
+                patch.object(W, "polish", side_effect=ValueError("no model")):
+            code, body = self.post("/transcribe", wav(), headers={"X-Whisper-Cleanup": "on"})
+        self.assertEqual((code, body["text"]), (200, self.holder.text))
+        banner.assert_not_called()
+
     def test_a_full_gpu_is_a_503_the_mac_falls_back_on(self):
         self.holder.error = RuntimeError("CUDA failed with error out of memory")
         code, body = self.post("/transcribe", wav())

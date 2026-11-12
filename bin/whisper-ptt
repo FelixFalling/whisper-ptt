@@ -56,9 +56,14 @@ case "${1:-status}" in
                MODE=$(cat "$STATE" 2>/dev/null || echo on)
                if [ "$MODE" = on ] && [ "${2:-status}" != status ]; then
                  # load the model now so the next dictation does not wait for it
-                 MODEL=$(python3 -c "import json,pathlib;print(json.loads((pathlib.Path.home()/'.config/whisper-ptt/config.json').read_text()).get('polish_model','qwen3:14b'))")
-                 curl -s -o /dev/null --max-time 60 http://127.0.0.1:11434/api/generate \
-                   -d "{\"model\":\"$MODEL\",\"keep_alive\":\"10m\"}" &
+                 # The address, model and keep-alive come from the settings (they were fixed
+                 # here, so a changed ollama_url was warmed at the wrong place).
+                 WARM=$(python3 -c "
+import json, pathlib
+c = json.loads((pathlib.Path.home() / '.config/whisper-ptt/config.json').read_text())
+print(c.get('ollama_url', 'http://127.0.0.1:11434').rstrip('/') + '/api/generate')
+print(json.dumps({'model': c.get('polish_model', 'qwen3:14b'), 'keep_alive': c.get('polish_keep_alive', '10m')}))")
+                 curl -s -o /dev/null --max-time 60 "${WARM%%$'\n'*}" -d "${WARM#*$'\n'}" &
                fi
                # --quiet: the top-bar switch shows the state itself, so no banner
                [ "${2:-status}" != status ] && [ "${3:-}" != --quiet ] && notify-send -a whisper-ptt -e -t 2000 \

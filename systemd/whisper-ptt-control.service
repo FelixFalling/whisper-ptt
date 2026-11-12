@@ -1,0 +1,17 @@
+[Unit]
+Description=Whisper push-to-talk remote switch (the Mac turns dictation on and off)
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 %h/.local/share/whisper-ptt/bin/whisper-control.py
+# Exits 0 when the server is off in config.json; anything else (the Tailscale address not
+# up yet, the port taken) is tried again.
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=yes
+MemoryMax=256M
+
+[Install]
+# Not tied to the desktop session: it has to be there when Whisper is off.
+WantedBy=default.target

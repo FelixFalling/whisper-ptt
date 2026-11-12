@@ -16,6 +16,7 @@ check: ## Check Python, shell, JSON, and GNOME JavaScript syntax
 
 test: check ## Run fast control tests with mocked systemd and Ollama
 	@cd "$(ROOT)" && $(PYTHON) -m unittest discover -s tests -p test_controls.py -v
+	@cd "$(ROOT)" && $(PYTHON) -m unittest discover -s tests -p test_remote_switch.py -v
 	@cd "$(ROOT)" && $(PYTHON) -m unittest discover -s tests -p test_short_entries.py -v
 	@cd "$(ROOT)" && $(PYTHON) -m unittest discover -s tests -p test_logging.py -v
 

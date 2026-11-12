@@ -21,6 +21,7 @@
   "server_host": "tailscale",
   "server_port": 8765,
   "server_token": "",
+  "server_control": true,
   "polish": true,
   "ollama_url": "http://127.0.0.1:11434",
   "polish_model": "qwen3.5:9b",

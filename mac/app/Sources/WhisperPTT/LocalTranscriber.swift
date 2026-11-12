@@ -2,7 +2,8 @@ import Foundation
 
 /// Transcribes on this Mac when the desktop is away, with mlx-whisper from the Python venv
 /// that mac/install.sh sets up. The helper (Resources/fallback.py) keeps running between
-/// dictations so its model loads only once.
+/// dictations so its model loads only once, and is stopped again after a while without use
+/// (see retire), which gives its memory back.
 final class LocalTranscriber: @unchecked Sendable {     // all state is used on `queue`
     struct Failure: LocalizedError {
         let errorDescription: String?
@@ -16,6 +17,8 @@ final class LocalTranscriber: @unchecked Sendable {     // all state is used on 
     private var input: FileHandle?
     private var output: FileHandle?
     private var pending = Data()
+    private var warmed = false          // this helper has been asked to load its model
+    private var lastUsed = Date()
 
     init(python: String) {
         self.python = python
@@ -25,19 +28,56 @@ final class LocalTranscriber: @unchecked Sendable {     // all state is used on 
         script != nil && FileManager.default.isExecutableFile(atPath: python)
     }
 
-    /// Starts the helper early: importing mlx-whisper takes a few seconds.
-    func prepare() {
-        queue.async { try? self.launch() }
+    /// Starts the helper and loads its model while the key is still held. Importing
+    /// mlx-whisper and reading the model took the first dictation after a start 2-3 s;
+    /// done here, they overlap with the speaking.
+    func prepare(_ cfg: Config) {
+        queue.async {
+            do {
+                try self.warm(cfg)
+            } catch {
+                Log.write("could not prepare the transcriber on this Mac: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// The same, waited for (for --check).
+    func load(_ cfg: Config) async throws {
+        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
+            queue.async {
+                done.resume(with: Result { try self.warm(cfg) })
+            }
+        }
+    }
+
+    private func warm(_ cfg: Config) throws {
+        try launch()
+        guard !warmed else { return }
+        _ = try exchange(["warm": true, "model": cfg.fallbackModel, "language": cfg.language])
+        warmed = true
     }
 
     func transcribe(_ wav: Data, cfg: Config) async throws -> String {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("whisper-ptt-\(UUID().uuidString).wav")
-        try wav.write(to: file)
+        try wav.write(to: file)             // the temporary folder is this user's alone
         defer { try? FileManager.default.removeItem(at: file) }
         let reply = try await ask(["wav": file.path, "model": cfg.fallbackModel,
-                                   "language": cfg.language, "initial_prompt": cfg.initialPrompt])
+                                   "language": cfg.language, "initial_prompt": cfg.initialPrompt,
+                                   "short_entry_min_words": cfg.shortEntryMinWords])
         return (reply["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Stops the helper once it has gone unused for `seconds`: it holds the model, about
+    /// 1.6 GB, for as long as it runs. The next press that needs it starts it again.
+    func retire(idleFor seconds: Double) {
+        queue.async {
+            guard let process = self.process, process.isRunning,
+                  Date().timeIntervalSince(self.lastUsed) > seconds else { return }
+            process.terminate()
+            self.process = nil
+            Log.write("stopped the transcriber on this Mac after \(Int(seconds / 60)) idle minutes")
+        }
     }
 
     /// Checks that the helper starts and mlx-whisper imports, without loading a model.
@@ -62,6 +102,8 @@ final class LocalTranscriber: @unchecked Sendable {     // all state is used on 
 
     private func exchange(_ request: [String: Any]) throws -> [String: Any] {
         try launch()
+        lastUsed = Date()
+        defer { lastUsed = Date() }
         var line = try JSONSerialization.data(withJSONObject: request)
         line.append(0x0A)
         do {
@@ -97,6 +139,8 @@ final class LocalTranscriber: @unchecked Sendable {     // all state is used on 
         input = stdin.fileHandleForWriting
         output = stdout.fileHandleForReading
         pending = Data()
+        warmed = false
+        lastUsed = Date()
         Log.write("started the transcriber on this Mac (\(python))")
     }
 
